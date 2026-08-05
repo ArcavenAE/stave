@@ -13,14 +13,19 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
-sha2 = "0.10"
-hex = "0.4"
 regex = "1"
+hex = "0.4"
 
-# Codegen pipeline (xtask regen)
-progenitor = "0.14"
-openapiv3 = "2"
-serde_json = "1"
-syn = { version = "2", features = ["full"] }
-prettyplease = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+# Schema parsing (xtask check-ops). Same crate the SDK uses at runtime,
+# so document parsing behaves identically in both places.
+graphql-parser.workspace = true
+
+# Credential + endpoint chains and GraphQL execution for `sync-spec`.
+# Reusing the SDK keeps one implementation of the chains and puts the
+# introspection call in the same audit trail as every other call.
+stave-sdk = { path = "../crates/stave-sdk", version = "0.0.1" }

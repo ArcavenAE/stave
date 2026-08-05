@@ -1,210 +1,323 @@
-//! End-to-end tests for `stave filter`.
+//! End-to-end coverage for `stave filter --where '<CEL>'` over the
+//! synthetic Wiz fixtures.
+//!
+//! The predicate language is the part of stave an agent is most likely
+//! to get wrong, so these tests pin the adapter rules the CLI documents:
+//! top-level fields bind as bare variables, the whole record binds as
+//! `record` for `has()`, camelCase `*At` fields promote to timestamps so
+//! they compare against `now`, and a predicate that does not return a
+//! boolean is an error rather than a silent drop.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+mod common;
 
-use assert_cmd::cargo::CommandCargoExt;
+use common::{Sandbox, fixture, ids, jsonl, run, run_with_stdin, stderr_of, stdout_of};
 
-fn fixture(name: &str) -> String {
-    let path = format!("../../examples/fixtures/{name}.jsonl");
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
+fn filter(kind: &str, predicate: &str) -> std::process::Output {
+    let sandbox = Sandbox::new();
+    run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["filter", "--where", predicate])
+            .env("STAVE_AUDIT", "off"),
+        &fixture(kind),
+    )
 }
 
-fn run_filter(input: &str, args: &[&str]) -> std::process::Output {
-    let mut cmd = Command::cargo_bin("stave").expect("stave binary");
-    cmd.arg("filter").args(args);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(input.as_bytes())
-        .expect("write");
-    child.wait_with_output().expect("wait")
-}
-
-#[test]
-fn keeps_records_matching_string_equality() {
-    let out = run_filter(
-        &fixture("vulnerability"),
-        &["--where", r#"severity == "critical""#],
-    );
+fn kept(kind: &str, predicate: &str) -> Vec<String> {
+    let out = filter(kind, predicate);
     assert!(
         out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        "predicate `{predicate}` failed: {}",
+        stderr_of(&out)
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].contains("\"cve_id\":\"CVE-2026-1111\""));
+    ids(&stdout_of(&out))
+}
+
+// ---------------------------------------------------------------------------
+// scalar predicates on Wiz nouns
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keeps_issues_matching_a_severity_enum() {
+    assert_eq!(kept("issue", r#"severity == "CRITICAL""#), ["issue_01"]);
 }
 
 #[test]
-fn keeps_records_matching_in_operator() {
-    let out = run_filter(
-        &fixture("vulnerability"),
-        &["--where", r#"severity in ["critical", "high"]"#],
-    );
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2);
-}
-
-#[test]
-fn supports_platform_triage_predicate() {
-    // The device-fleet analog of sidestep's triage predicate: Macs on
-    // an out-of-date OS line.
-    let out = run_filter(
-        &fixture("device"),
-        &[
-            "--where",
-            r#"platform == "Mac" && os_version.startsWith("14.")"#,
-        ],
-    );
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "only osprey is a 14.x Mac: {lines:?}");
-    assert!(lines[0].contains("\"device_name\":\"osprey\""));
-}
-
-#[test]
-fn has_macro_works_via_record_view() {
-    let out = run_filter(&fixture("device"), &["--where", "has(record.asset_tag)"]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    // kestrel and rocinante carry asset tags in the fixture.
-    assert_eq!(lines.len(), 2);
-}
-
-#[test]
-fn explain_prints_predicate_and_schema_without_consuming_stdin() {
-    let mut cmd = Command::cargo_bin("stave").expect("stave binary");
-    cmd.args(["filter", "--where", r#"severity == "high""#, "--explain"]);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let out = cmd.output().expect("run");
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("predicate: severity == \"high\""));
-    assert!(stdout.contains("now:"));
-    assert!(stdout.contains("ast:"));
-    assert!(stdout.contains("v0.1 kind schemas"));
-    assert!(stdout.contains("device"));
-    assert!(stdout.contains("vulnerability"));
-}
-
-#[test]
-fn rejects_predicate_returning_non_bool() {
-    let out = run_filter(&fixture("vulnerability"), &["--where", r#"severity"#]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("must return bool"), "stderr: {stderr}");
-}
-
-#[test]
-fn date_suffix_field_promotes_for_comparison_with_now() {
-    // `first_detection_date` exercises the `*_date` promotion rule the
-    // iru adapter adds on top of sidestep's `*_at`/`ts` set. All
-    // fixture dates are in the past, so `< now` keeps everything.
-    let out = run_filter(
-        &fixture("vulnerability"),
-        &["--where", "first_detection_date < now"],
-    );
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let stdout = String::from_utf8(out.stdout).unwrap();
+fn keeps_issues_matching_a_severity_set() {
     assert_eq!(
-        stdout.lines().count(),
-        fixture("vulnerability").lines().count()
+        kept("issue", r#"severity in ["CRITICAL", "HIGH"]"#),
+        ["issue_01", "issue_02"]
     );
 }
 
 #[test]
-fn last_check_in_promotes_for_comparison_with_now() {
-    // Device staleness is the canonical iru fleet question: which
-    // devices haven't checked in for N days?
-    let out = run_filter(
-        &fixture("device"),
-        &["--where", r#"last_check_in < now - duration("720h")"#],
+fn combines_kind_and_status_in_one_predicate() {
+    // `_kind` is re-exposed so a mixed stream can be narrowed in one pass.
+    assert_eq!(
+        kept("issue", r#"_kind == "issue" && status == "OPEN""#),
+        ["issue_01", "issue_03"]
     );
+}
+
+#[test]
+fn vulnerability_findings_carry_vendor_severity_not_severity() {
+    // The severity carrier differs per kind, which is exactly why the
+    // severity-roll-up recipe exists. Here the raw field is asserted.
+    assert_eq!(
+        kept("vulnerability_finding", r#"vendorSeverity == "HIGH""#),
+        ["vf_02", "vf_03"]
+    );
+}
+
+#[test]
+fn string_methods_work_on_finding_names() {
+    assert_eq!(
+        kept("vulnerability_finding", r#"name.startsWith("CVE-2026")"#),
+        ["vf_01", "vf_02", "vf_03"]
+    );
+}
+
+#[test]
+fn keeps_cloud_resources_matching_a_resource_type() {
+    assert_eq!(
+        kept("cloud_resource", r#"type == "VIRTUAL_MACHINE""#),
+        ["res_02", "res_03"]
+    );
+}
+
+#[test]
+fn keeps_cloud_resources_by_platform() {
+    assert_eq!(
+        kept("cloud_resource", r#"cloudPlatform == "Azure""#),
+        ["res_03", "res_04"]
+    );
+}
+
+#[test]
+fn matches_nothing_without_failing() {
+    let out = filter("issue", r#"severity == "INFORMATIONAL""#);
+    assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        stdout_of(&out).trim().is_empty(),
+        "an empty result is success, not failure"
     );
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    // Only osprey (2026-05-01) is more than 30 days stale relative to
-    // any plausible test-run date after 2026-07-15.
-    assert_eq!(lines.len(), 1, "expected only osprey stale: {lines:?}");
-    assert!(lines[0].contains("osprey"));
+}
+
+// ---------------------------------------------------------------------------
+// null and absence
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_null_field_is_bound_and_comparable() {
+    // Wiz sends `resolvedAt: null` on an open issue rather than omitting
+    // the key, so the null-vs-absent distinction is real in this data.
+    assert_eq!(kept("issue", "record.resolvedAt != null"), ["issue_04"]);
 }
 
 #[test]
-fn filter_then_emit_md_pipeline() {
-    // Compose `filter` and `emit` in one process tree.
-    let mut filter = Command::cargo_bin("stave").expect("stave");
-    filter.args([
-        "filter",
-        "--where",
-        r#"_kind == "vulnerability" && severity == "critical""#,
-    ]);
-    filter.stdin(Stdio::piped()).stdout(Stdio::piped());
-    let mut filter_child = filter.spawn().expect("spawn filter");
-    filter_child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(fixture("vulnerability").as_bytes())
-        .unwrap();
-    drop(filter_child.stdin.take());
-    let filter_out = filter_child.wait_with_output().expect("wait filter");
-    assert!(filter_out.status.success());
+fn has_macro_answers_presence_through_the_record_view() {
+    // Every fixture issue carries the key, so `has()` is true throughout.
+    // The point under test is that the macro works at all, since CEL only
+    // accepts field access on a map.
+    assert_eq!(
+        kept("issue", "has(record.resolvedAt)").len(),
+        4,
+        "the key is present on every record, null or not"
+    );
+}
 
-    let mut emit = Command::cargo_bin("stave").expect("stave");
-    emit.args(["emit", "--format", "md"]);
-    emit.stdin(Stdio::piped()).stdout(Stdio::piped());
-    let mut emit_child = emit.spawn().expect("spawn emit");
-    emit_child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(&filter_out.stdout)
-        .unwrap();
-    drop(emit_child.stdin.take());
-    let emit_out = emit_child.wait_with_output().expect("wait emit");
-    assert!(emit_out.status.success());
+#[test]
+fn has_macro_returns_false_for_a_field_the_kind_does_not_carry() {
+    assert!(
+        kept("issue", "has(record.vendorSeverity)").is_empty(),
+        "vendorSeverity belongs to vulnerability_finding, not issue"
+    );
+}
 
-    let table = String::from_utf8(emit_out.stdout).unwrap();
-    assert!(table.contains("| _kind | id | severity | timestamp |"));
-    assert!(table.contains("CVE-2026-1111"));
-    assert!(table.contains("critical"));
-    assert!(!table.contains("CVE-2026-2222"));
+#[test]
+fn a_nested_entity_snapshot_is_reachable_behind_a_null_guard() {
+    // `entitySnapshot` is null on a resolved issue. Guarding first keeps
+    // the predicate total; without the guard the field access on null is
+    // a runtime error, which is the canonical-adapter behavior.
+    assert_eq!(
+        kept(
+            "issue",
+            r#"record.entitySnapshot != null && entitySnapshot.cloudPlatform == "AWS""#
+        ),
+        ["issue_01", "issue_02"]
+    );
+}
+
+#[test]
+fn reaching_into_a_null_snapshot_without_a_guard_is_a_runtime_error() {
+    let out = filter("issue", r#"entitySnapshot.cloudPlatform == "Azure""#);
+    assert!(
+        !out.status.success(),
+        "a missing field is an error, never a silent null"
+    );
+    let err = stderr_of(&out);
+    assert!(err.contains("CEL runtime error"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// timestamp promotion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn camel_case_at_fields_promote_for_comparison_with_now() {
+    // Wiz uses camelCase (`createdAt`), unlike the snake_case streams the
+    // adapter was first written for. Every fixture issue predates any
+    // plausible run, so `< now` keeps all four.
+    assert_eq!(kept("issue", "createdAt < now").len(), 4);
+}
+
+#[test]
+fn first_detected_at_promotes_on_vulnerability_findings() {
+    assert_eq!(
+        kept("vulnerability_finding", "firstDetectedAt < now").len(),
+        5
+    );
+}
+
+#[test]
+fn a_duration_window_wide_enough_to_be_date_stable_keeps_everything() {
+    // Ten years back. Deliberately not a tight window: a fixed fixture
+    // date plus a tight window makes the test expire.
+    assert_eq!(
+        kept("issue", r#"createdAt > now - duration("87600h")"#).len(),
+        4
+    );
+}
+
+#[test]
+fn a_future_window_keeps_nothing() {
+    assert!(kept("issue", "createdAt > now").is_empty());
+}
+
+#[test]
+fn two_timestamp_fields_compare_against_each_other() {
+    // `updatedAt >= createdAt` holds for every fixture record, and both
+    // sides had to promote for the comparison to typecheck.
+    assert_eq!(kept("issue", "updatedAt >= createdAt").len(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// errors and diagnostics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejects_a_predicate_that_does_not_return_a_boolean() {
+    let out = filter("issue", "severity");
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("must return bool"), "{err}");
+    assert!(
+        err.contains("severity"),
+        "the message must quote the predicate: {err}"
+    );
+}
+
+#[test]
+fn rejects_a_malformed_stream_line() {
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["filter", "--where", "_kind == \"issue\""])
+            .env("STAVE_AUDIT", "off"),
+        "{not json}\n",
+    );
+    assert!(!out.status.success(), "{out:?}");
+    assert!(!stderr_of(&out).is_empty(), "a parse failure must say so");
+}
+
+#[test]
+fn explain_prints_the_predicate_the_now_binding_and_the_kind_table() {
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args([
+            "filter",
+            "--where",
+            r#"severity == "CRITICAL""#,
+            "--explain",
+        ])
+        .env("STAVE_AUDIT", "off"));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout.contains(r#"predicate: severity == "CRITICAL""#),
+        "{stdout}"
+    );
+    assert!(stdout.contains("now:"), "{stdout}");
+    assert!(stdout.contains("ast:"), "{stdout}");
+    assert!(stdout.contains("v0.1 kind schemas"), "{stdout}");
+    // The table is the authoring aid: it must name the per-kind fields a
+    // predicate author cannot otherwise guess.
+    assert!(stdout.contains("issue"), "{stdout}");
+    assert!(stdout.contains("vulnerability_finding"), "{stdout}");
+    assert!(stdout.contains("createdAt"), "{stdout}");
+    assert!(stdout.contains("vendorSeverity"), "{stdout}");
+    assert!(stdout.contains("firstDetectedAt"), "{stdout}");
+}
+
+#[test]
+fn explain_does_not_read_stdin() {
+    // A stdin-reading explain would hang in a pipeline. The fixture is
+    // written but must be ignored, so no records may appear.
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["filter", "--where", "_kind == \"issue\"", "--explain"])
+            .env("STAVE_AUDIT", "off"),
+        &fixture("issue"),
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        !stdout_of(&out).contains("issue_01"),
+        "explain must not stream records: {}",
+        stdout_of(&out)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// composition
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filter_output_is_a_valid_stream_for_the_next_primitive() {
+    let out = filter("issue", r#"severity in ["CRITICAL", "HIGH"]"#);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let sandbox = Sandbox::new();
+    let emitted = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["emit", "--format", "md"])
+            .env("STAVE_AUDIT", "off"),
+        &stdout_of(&out),
+    );
+    assert!(emitted.status.success(), "{}", stderr_of(&emitted));
+    let table = stdout_of(&emitted);
+    assert!(
+        table.contains("| _kind | id | severity | timestamp |"),
+        "{table}"
+    );
+    assert!(table.contains("issue_01"), "{table}");
+    assert!(table.contains("CRITICAL"), "{table}");
+    assert!(
+        !table.contains("issue_03"),
+        "the dropped record must not reappear: {table}"
+    );
+}
+
+#[test]
+fn filter_preserves_the_source_reference_of_every_kept_record() {
+    let out = filter("issue", r#"severity == "CRITICAL""#);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let records = jsonl(&stdout_of(&out));
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["_source"]["operation_id"], "list_issues");
+    assert_eq!(records[0]["_source"]["response_index"], 0);
 }

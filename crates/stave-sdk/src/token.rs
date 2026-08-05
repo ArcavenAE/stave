@@ -55,8 +55,7 @@ impl CachedToken {
     fn is_fresh(&self, token_url: &str, client_id: &str) -> bool {
         self.token_url == token_url
             && self.client_id == client_id
-            && self.expires_at - chrono::Utc::now()
-                > chrono::TimeDelta::seconds(EXPIRY_MARGIN_SECS)
+            && self.expires_at - chrono::Utc::now() > chrono::TimeDelta::seconds(EXPIRY_MARGIN_SECS)
     }
 }
 
@@ -215,8 +214,8 @@ mod tests {
 
     #[test]
     fn dc_claim_reads_payload() {
-        let token = fake_jwt(serde_json::json!({"dc": "us17", "sub": "svc"}));
-        assert_eq!(dc_claim(&token).as_deref(), Some("us17"));
+        let token = fake_jwt(serde_json::json!({"dc": "example1", "sub": "svc"}));
+        assert_eq!(dc_claim(&token).as_deref(), Some("example1"));
     }
 
     #[test]

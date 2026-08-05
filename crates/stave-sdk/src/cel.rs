@@ -27,7 +27,7 @@ use cel_interpreter::{Context, Program, Value};
 use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::Value as JsonValue;
 
-use crate::error::{StaveError, Result};
+use crate::error::{Result, StaveError};
 use crate::stream::Record;
 
 /// Compile a CEL predicate. Caller-friendly wrapper that maps cel

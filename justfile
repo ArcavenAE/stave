@@ -1,4 +1,4 @@
-# stave — Rust CLI for the iru (Kandji) Endpoint Management API
+# stave — unofficial Rust CLI for the Wiz API
 
 default:
     @just --list
@@ -19,10 +19,8 @@ run *args:
 test:
     cargo test --workspace --all-targets
 
-# Doctests, skipping the generated stave-api crate (its doctests come
-# from the OpenAPI spec and are illustrative, not verified).
 test-doc:
-    cargo test --workspace --doc --exclude stave-api
+    cargo test --workspace --doc
 
 # ─── Quality Checks ────────────────────────────────────
 
@@ -46,19 +44,21 @@ fmt:
 
 # ─── CI Mirror ─────────────────────────────────────────
 
-ci: check-fmt check-clippy build check-deny test test-doc
+ci: check-fmt check-clippy build check-deny test test-doc check-ops
 
 # ─── Spec / Codegen ────────────────────────────────────
 
-# Fetch the upstream OpenAPI spec and update the vendored copy.
+# Introspect the tenant GraphQL API and refresh spec/wiz-schema.graphql
+# plus its sha256 pin. Needs service-account credentials.
 sync-spec:
     cargo xtask sync-spec
 
-# Regenerate stave-api from the vendored spec (not yet wired).
-regen:
-    cargo xtask regen
+# Validate every curated operation document against the vendored schema.
+# A no-op (exit 0, loud warning) until sync-spec has landed the schema.
+check-ops:
+    cargo xtask check-ops
 
-# Diff the vendored spec against upstream (not yet wired).
+# Diff the vendored schema against the live one (not yet wired).
 diff-spec:
     cargo xtask diff-spec
 

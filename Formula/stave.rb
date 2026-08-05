@@ -5,7 +5,7 @@
 # macOS only (arm64). Linux support is a future option.
 
 class Stave < Formula
-  desc "Spec-driven CLI for the iru (Kandji) Endpoint Management API"
+  desc "Unofficial CLI for the Wiz API (not affiliated with Wiz, Inc.)"
   homepage "https://github.com/ArcavenAE/stave"
   version "VERSION_PLACEHOLDER"
   license "MIT"
@@ -26,22 +26,26 @@ class Stave < Formula
       stave updates on every push to main (alpha versions) until the
       first stable tag is cut.
 
-      Bootstrap credentials (recommended — token goes to macOS Keychain):
+      Bootstrap credentials (recommended; the client secret goes to the
+      macOS Keychain):
 
-        echo "$IRU_API_TOKEN" | stave auth login --stdin --subdomain <tenant>
+        stave auth login
         stave auth status
 
       Discover and invoke operations:
 
         stave ops list
-        stave api <operationId> --param key=value
-        stave list device --limit 5
+        stave api list_issues --var first=5
+        stave list issue --limit 5
 
-      stave is read-only against your tenant by default; mutating
-      operations require --allow-write.
+      stave is read-only against your tenant by default; GraphQL
+      mutations require --allow-write.
 
       Every API call writes a structured JSONL audit line under
       ~/.stave/audit/ (macOS) or ~/.local/state/stave/audit/ (Linux).
+
+      stave is an unofficial CLI for the Wiz API. Not affiliated with
+      or endorsed by Wiz, Inc.
     EOS
   end
 

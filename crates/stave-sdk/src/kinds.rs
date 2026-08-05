@@ -241,7 +241,12 @@ mod tests {
         // honest against the embedded operation library.
         for k in KIND_TABLE {
             let op = crate::ops::find(k.list_operation);
-            assert!(op.is_ok(), "kind {} list op {} missing", k.name, k.list_operation);
+            assert!(
+                op.is_ok(),
+                "kind {} list op {} missing",
+                k.name,
+                k.list_operation
+            );
         }
     }
 

@@ -97,12 +97,7 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo test --workspace --all-targets
-      # `--exclude stave-api` skips progenitor's generated doctests.
-      # `[lib].doctest = false` doesn't gate `cargo test --doc`, so we
-      # filter at invocation time. The generated examples are illustrative
-      # and not guaranteed to compile against our reqwest version. Real
-      # verification lives in stave-sdk integration tests.
-      - run: cargo test --workspace --doc --exclude stave-api
+      - run: cargo test --workspace --doc
 
   test-macos:
     name: Test (macOS)
@@ -124,12 +119,7 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo test --workspace --all-targets
-      # `--exclude stave-api` skips progenitor's generated doctests.
-      # `[lib].doctest = false` doesn't gate `cargo test --doc`, so we
-      # filter at invocation time. The generated examples are illustrative
-      # and not guaranteed to compile against our reqwest version. Real
-      # verification lives in stave-sdk integration tests.
-      - run: cargo test --workspace --doc --exclude stave-api
+      - run: cargo test --workspace --doc
 
   deny:
     name: Cargo Deny

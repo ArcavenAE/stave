@@ -17,29 +17,6 @@ confidence-threshold = 0.8
 # Per-crate exceptions for non-permissive licenses. Each entry must
 # document why this specific crate is accepted at this license.
 [[licenses.exceptions]]
-# progenitor's runtime client. Required for the spec-driven codegen
-# pipeline (see charter B2). MPL-2.0 is file-level copyleft only;
-# unmodified use as a dependency is unrestricted.
-name = "progenitor-client"
-allow = ["MPL-2.0"]
-
-[[licenses.exceptions]]
-# progenitor codegen library — used at xtask time to regenerate
-# stave-api from the OpenAPI spec. MPL-2.0 file-level copyleft.
-name = "progenitor"
-allow = ["MPL-2.0"]
-
-[[licenses.exceptions]]
-# progenitor's implementation crate. Same provenance and posture.
-name = "progenitor-impl"
-allow = ["MPL-2.0"]
-
-[[licenses.exceptions]]
-# progenitor's macro support. Same provenance and posture.
-name = "progenitor-macro"
-allow = ["MPL-2.0"]
-
-[[licenses.exceptions]]
 # Transitive via the `dirs` crate (XDG path resolution). Mozilla-origin
 # helper for Option<T> ergonomics. MPL-2.0 file-level copyleft, unmodified.
 name = "option-ext"

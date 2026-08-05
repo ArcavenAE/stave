@@ -1,289 +1,412 @@
-//! End-to-end tests for `stave enrich`.
+//! End-to-end coverage for `stave enrich --with <recipe>`.
 //!
-//! Covers all three v0.1 recipes (blueprint-context, severity-roll-up,
-//! device-platform) against the iru fixtures so the cross-kind-join
-//! semantic is enforced via the Rust binary.
+//! All three v0.1 recipes run through the binary against the synthetic
+//! Wiz fixtures, so the cross-kind join semantics are enforced at the
+//! CLI boundary and not only in the SDK unit tests:
+//!
+//!   * `account-context` joins a cloud_resource to its owning cloud
+//!     account on `subscriptionExternalId`, and marks an orphan
+//!     subscription with `account: null` rather than dropping it.
+//!   * `severity-roll-up` normalises whichever severity field the kind
+//!     happens to carry into one `severity_rollup`.
+//!   * `entity-hoist` lifts `issue.entitySnapshot` fields to top level
+//!     so a predicate can reach them without a nested path.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+mod common;
 
-use assert_cmd::cargo::CommandCargoExt;
+use common::{Sandbox, fixture, fixture_path, jsonl, run_with_stdin, stderr_of, stdout_of};
+use serde_json::Value;
 
-fn fixture(name: &str) -> String {
-    let path = format!("../../examples/fixtures/{name}.jsonl");
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
+fn enrich(kind: &str, args: &[&str]) -> std::process::Output {
+    let sandbox = Sandbox::new();
+    run_with_stdin(
+        sandbox
+            .cmd()
+            .arg("enrich")
+            .args(args)
+            .env("STAVE_AUDIT", "off"),
+        &fixture(kind),
+    )
 }
 
-fn fixture_path(name: &str) -> String {
-    format!("../../examples/fixtures/{name}.jsonl")
+fn enriched(kind: &str, args: &[&str]) -> Vec<Value> {
+    let out = enrich(kind, args);
+    assert!(
+        out.status.success(),
+        "enrich {args:?} failed: {}",
+        stderr_of(&out)
+    );
+    jsonl(&stdout_of(&out))
 }
 
-fn run_enrich(input: &str, args: &[&str]) -> std::process::Output {
-    let mut cmd = Command::cargo_bin("stave").expect("stave binary");
-    cmd.arg("enrich").args(args);
-    cmd.env_remove("STAVE_API_TOKEN");
-    cmd.env("STAVE_AUDIT", "off");
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(input.as_bytes())
-        .expect("write");
-    child.wait_with_output().expect("wait")
-}
-
-fn parse_jsonl(s: &str) -> Vec<serde_json::Value> {
-    s.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).expect("valid json"))
+fn by_id(records: &[Value]) -> std::collections::HashMap<String, &Value> {
+    records
+        .iter()
+        .map(|r| {
+            (
+                r["id"]
+                    .as_str()
+                    .expect("every record has an id")
+                    .to_string(),
+                r,
+            )
+        })
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// account-context (the join)
+// ---------------------------------------------------------------------------
+
 #[test]
-fn blueprint_context_attaches_parent_to_each_device() {
-    let out = run_enrich(
-        &fixture("device"),
+fn account_context_attaches_the_owning_account_to_each_cloud_resource() {
+    let records = enriched(
+        "cloud_resource",
         &[
             "--with",
-            "blueprint-context",
-            "--blueprints",
-            &fixture_path("blueprint"),
+            "account-context",
+            "--accounts",
+            &fixture_path("cloud_account"),
         ],
     );
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let records = parse_jsonl(&String::from_utf8(out.stdout).unwrap());
+    let index = by_id(&records);
 
-    let by_name: std::collections::HashMap<String, &serde_json::Value> = records
+    assert_eq!(
+        index["res_01"]["account"]["externalId"].as_str(),
+        Some("123456789012"),
+        "res_01 belongs to the AWS production account"
+    );
+    assert_eq!(
+        index["res_01"]["account"]["name"].as_str(),
+        Some("example-corp-prod")
+    );
+    assert_eq!(
+        index["res_01"]["account"]["cloudProvider"].as_str(),
+        Some("AWS")
+    );
+    assert_eq!(
+        index["res_03"]["account"]["name"].as_str(),
+        Some("example-corp-sandbox"),
+        "res_03 belongs to the Azure sandbox subscription"
+    );
+    assert_eq!(
+        index["res_03"]["account"]["status"].as_str(),
+        Some("PARTIALLY_CONNECTED"),
+        "the join carries account status, which triage needs"
+    );
+}
+
+#[test]
+fn account_context_marks_an_orphan_subscription_with_null_rather_than_dropping_it() {
+    // res_04's subscription has no matching account in the auxiliary set.
+    // A silent drop would hide a real gap in the connector inventory.
+    let records = enriched(
+        "cloud_resource",
+        &[
+            "--with",
+            "account-context",
+            "--accounts",
+            &fixture_path("cloud_account"),
+        ],
+    );
+    let index = by_id(&records);
+    assert_eq!(records.len(), 4, "no record is dropped: {records:?}");
+    assert!(
+        index["res_04"]["account"].is_null(),
+        "orphan reference must be data: {}",
+        index["res_04"]
+    );
+}
+
+#[test]
+fn account_context_attaches_only_the_summary_fields() {
+    // The join keeps the stream compact, so the attached account is a
+    // summary and not the whole record.
+    let records = enriched(
+        "cloud_resource",
+        &[
+            "--with",
+            "account-context",
+            "--accounts",
+            &fixture_path("cloud_account"),
+        ],
+    );
+    let account = records[0]["account"].as_object().expect("account attached");
+    let mut keys: Vec<&str> = account.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["cloudProvider", "externalId", "id", "name", "status"],
+        "unexpected summary shape: {account:?}"
+    );
+    assert!(
+        account.get("_source").is_none(),
+        "the auxiliary record's provenance is not carried into the join"
+    );
+}
+
+#[test]
+fn account_context_passes_other_kinds_through_untouched() {
+    let records = enriched(
+        "issue",
+        &[
+            "--with",
+            "account-context",
+            "--accounts",
+            &fixture_path("cloud_account"),
+        ],
+    );
+    assert_eq!(records.len(), 4);
+    for r in &records {
+        assert_eq!(r["_kind"].as_str(), Some("issue"));
+        assert!(
+            r.get("account").is_none(),
+            "an issue is not a cloud_resource: {r}"
+        );
+    }
+}
+
+#[test]
+fn account_context_requires_the_accounts_flag() {
+    let out = enrich("cloud_resource", &["--with", "account-context"]);
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("requires --accounts"), "{err}");
+    assert!(
+        err.contains("cloud_account"),
+        "the error must name the kind it needs: {err}"
+    );
+}
+
+#[test]
+fn account_context_rejects_an_auxiliary_stream_of_the_wrong_kind() {
+    // Indexing the wrong kind would produce an all-null join that looks
+    // exactly like real orphan data, so this fails loudly instead.
+    let out = enrich(
+        "cloud_resource",
+        &[
+            "--with",
+            "account-context",
+            "--accounts",
+            &fixture_path("issue"),
+        ],
+    );
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("carries a `issue` record"), "{err}");
+    assert!(err.contains("cloud_account"), "{err}");
+    assert!(
+        err.contains("stave list cloud_account"),
+        "the error must name how to capture the right stream: {err}"
+    );
+}
+
+#[test]
+fn account_context_reports_a_missing_auxiliary_file() {
+    let out = enrich(
+        "cloud_resource",
+        &[
+            "--with",
+            "account-context",
+            "--accounts",
+            "/nonexistent/stave-test-accounts.jsonl",
+        ],
+    );
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        stderr_of(&out).contains("stave-test-accounts.jsonl"),
+        "the error must name the path it could not open: {}",
+        stderr_of(&out)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// severity-roll-up (the normaliser)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn severity_rollup_reads_vendor_severity_on_vulnerability_findings() {
+    let records = enriched("vulnerability_finding", &["--with", "severity-roll-up"]);
+    assert_eq!(records.len(), 5);
+    for r in &records {
+        assert_eq!(
+            r["severity_rollup"].as_str(),
+            r["vendorSeverity"].as_str(),
+            "vendorSeverity is the carrier for this kind: {r}"
+        );
+    }
+}
+
+#[test]
+fn severity_rollup_falls_back_to_severity_on_issues() {
+    let records = enriched("issue", &["--with", "severity-roll-up"]);
+    assert_eq!(records.len(), 4);
+    for r in &records {
+        assert_eq!(r["severity_rollup"].as_str(), r["severity"].as_str());
+    }
+    let index = by_id(&records);
+    assert_eq!(
+        index["issue_01"]["severity_rollup"].as_str(),
+        Some("CRITICAL")
+    );
+}
+
+#[test]
+fn severity_rollup_is_null_for_a_kind_that_carries_no_severity() {
+    // A cloud_resource has no severity at all. Null keeps a mixed stream
+    // uniform, so a downstream rank predicate need not special-case it.
+    let records = enriched("cloud_resource", &["--with", "severity-roll-up"]);
+    assert_eq!(records.len(), 4);
+    for r in &records {
+        assert!(r["severity_rollup"].is_null(), "{r}");
+    }
+}
+
+#[test]
+fn severity_rollup_normalises_a_mixed_stream_into_one_field() {
+    // The reason the recipe exists: one predicate over two kinds whose
+    // severity lives under different names.
+    let sandbox = Sandbox::new();
+    let mixed = format!("{}{}", fixture("issue"), fixture("vulnerability_finding"));
+    let rolled = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["enrich", "--with", "severity-roll-up"])
+            .env("STAVE_AUDIT", "off"),
+        &mixed,
+    );
+    assert!(rolled.status.success(), "{}", stderr_of(&rolled));
+
+    let filtered = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["filter", "--where", r#"severity_rollup == "CRITICAL""#])
+            .env("STAVE_AUDIT", "off"),
+        &stdout_of(&rolled),
+    );
+    assert!(filtered.status.success(), "{}", stderr_of(&filtered));
+    let critical = jsonl(&stdout_of(&filtered));
+    let ids: Vec<&str> = critical
         .iter()
-        .map(|r| (r["device_name"].as_str().unwrap().to_string(), r))
+        .map(|r| r["id"].as_str().unwrap_or_default())
         .collect();
+    assert_eq!(
+        ids,
+        ["issue_01", "vf_01"],
+        "one predicate must reach both kinds: {ids:?}"
+    );
+}
 
+// ---------------------------------------------------------------------------
+// entity-hoist (the flattener)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn entity_hoist_lifts_the_snapshot_to_top_level_fields() {
+    let records = enriched("issue", &["--with", "entity-hoist"]);
+    let index = by_id(&records);
     assert_eq!(
-        by_name["kestrel"]["blueprint"]["id"].as_str(),
-        Some("bp_001"),
-        "kestrel → bp_001 (Mac Fleet)"
+        index["issue_01"]["entity_name"].as_str(),
+        Some("example-corp-audit-logs")
     );
+    assert_eq!(index["issue_01"]["entity_type"].as_str(), Some("BUCKET"));
     assert_eq!(
-        by_name["kestrel"]["blueprint"]["name"].as_str(),
-        Some("Mac Fleet")
-    );
-    assert_eq!(
-        by_name["osprey"]["blueprint"]["id"].as_str(),
-        Some("bp_002"),
-        "osprey → bp_002 (Kiosk iPads)"
-    );
-    assert_eq!(
-        by_name["rocinante"]["blueprint"]["id"].as_str(),
-        Some("bp_001")
-    );
-    assert!(
-        by_name["skiff-ipad"]["blueprint"].is_null(),
-        "skiff-ipad (blueprint bp_999 absent) → null"
+        index["issue_01"]["entity_cloud_platform"].as_str(),
+        Some("AWS")
     );
 }
 
 #[test]
-fn blueprint_context_passes_through_non_devices() {
-    let out = run_enrich(
-        &fixture("vulnerability"),
-        &[
-            "--with",
-            "blueprint-context",
-            "--blueprints",
-            &fixture_path("blueprint"),
-        ],
+fn entity_hoist_leaves_the_original_snapshot_in_place() {
+    let records = enriched("issue", &["--with", "entity-hoist"]);
+    let index = by_id(&records);
+    assert_eq!(
+        index["issue_02"]["entitySnapshot"]["name"].as_str(),
+        Some("example-corp-api-01"),
+        "hoisting copies, it does not move"
     );
+}
+
+#[test]
+fn entity_hoist_passes_through_an_issue_with_no_snapshot() {
+    // issue_04 is resolved and carries `entitySnapshot: null`.
+    let records = enriched("issue", &["--with", "entity-hoist"]);
+    let index = by_id(&records);
     assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        index["issue_04"].get("entity_name").is_none(),
+        "nothing to hoist means no key: {}",
+        index["issue_04"]
     );
-    let records = parse_jsonl(&String::from_utf8(out.stdout).unwrap());
-    assert!(!records.is_empty());
+}
+
+#[test]
+fn entity_hoist_passes_through_kinds_with_no_snapshot_field() {
+    let records = enriched("vulnerability_finding", &["--with", "entity-hoist"]);
+    assert_eq!(records.len(), 5);
     for r in &records {
-        assert_eq!(r["_kind"].as_str(), Some("vulnerability"));
+        assert!(r.get("entity_name").is_none(), "{r}");
+    }
+}
+
+#[test]
+fn entity_hoist_then_filter_reaches_the_hoisted_field_without_a_null_guard() {
+    // The payoff: the same question that needs `record.entitySnapshot !=
+    // null && entitySnapshot.cloudPlatform == "AWS"` on the raw stream
+    // becomes a flat comparison after hoisting.
+    let sandbox = Sandbox::new();
+    let hoisted = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["enrich", "--with", "entity-hoist"])
+            .env("STAVE_AUDIT", "off"),
+        &fixture("issue"),
+    );
+    assert!(hoisted.status.success(), "{}", stderr_of(&hoisted));
+
+    let filtered = run_with_stdin(
+        sandbox
+            .cmd()
+            .args([
+                "filter",
+                "--where",
+                r#"has(record.entity_cloud_platform) && entity_cloud_platform == "AWS""#,
+            ])
+            .env("STAVE_AUDIT", "off"),
+        &stdout_of(&hoisted),
+    );
+    assert!(filtered.status.success(), "{}", stderr_of(&filtered));
+    let ids = common::ids(&stdout_of(&filtered));
+    assert_eq!(ids, ["issue_01", "issue_02"], "{ids:?}");
+}
+
+// ---------------------------------------------------------------------------
+// recipe selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejects_an_unknown_recipe_and_lists_the_real_ones() {
+    let out = enrich("issue", &["--with", "totally-fake"]);
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("unknown recipe"), "{err}");
+    for recipe in ["account-context", "severity-roll-up", "entity-hoist"] {
         assert!(
-            r.get("blueprint").is_none(),
-            "vulnerability records should not get a blueprint attached: {}",
-            r["cve_id"]
+            err.contains(recipe),
+            "suggestion list is missing {recipe}: {err}"
         );
     }
 }
 
 #[test]
-fn blueprint_context_requires_blueprints_flag() {
-    let out = run_enrich(&fixture("device"), &["--with", "blueprint-context"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("requires --blueprints"), "stderr: {stderr}");
-}
-
-#[test]
-fn severity_rollup_copies_own_severity_for_vulnerabilities() {
-    let out = run_enrich(&fixture("vulnerability"), &["--with", "severity-roll-up"]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+fn enrich_passes_an_empty_stream_through() {
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["enrich", "--with", "severity-roll-up"])
+            .env("STAVE_AUDIT", "off"),
+        "",
     );
-    let records = parse_jsonl(&String::from_utf8(out.stdout).unwrap());
-    assert!(!records.is_empty());
-    for r in &records {
-        let sev = r["severity"].as_str();
-        let rollup = r["severity_rollup"].as_str();
-        assert_eq!(sev, rollup, "rollup must equal own severity: {r}");
-    }
-}
-
-#[test]
-fn severity_rollup_yields_null_for_kinds_without_severity() {
-    let out = run_enrich(&fixture("device"), &["--with", "severity-roll-up"]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let records = parse_jsonl(&String::from_utf8(out.stdout).unwrap());
-    for r in &records {
-        assert!(
-            r["severity_rollup"].is_null(),
-            "devices carry no severity — rollup must be null: {r}"
-        );
-    }
-}
-
-#[test]
-fn device_platform_hoists_top_level_field_for_devices() {
-    let out = run_enrich(&fixture("device"), &["--with", "device-platform"]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let records = parse_jsonl(&String::from_utf8(out.stdout).unwrap());
-    for r in &records {
-        let nested = r["platform"].as_str();
-        let hoisted = r["_platform"].as_str();
-        assert_eq!(nested, hoisted, "hoist must mirror platform");
-        assert!(nested.is_some(), "device fixtures all have platform");
-    }
-}
-
-#[test]
-fn device_platform_passes_through_records_without_platform() {
-    // vulnerability fixtures don't have a platform field.
-    let out = run_enrich(&fixture("vulnerability"), &["--with", "device-platform"]);
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let records = parse_jsonl(&String::from_utf8(out.stdout).unwrap());
-    for r in &records {
-        assert!(
-            r.get("_platform").is_none(),
-            "vulnerability should pass through"
-        );
-    }
-}
-
-#[test]
-fn rejects_unknown_recipe() {
-    let out = run_enrich(&fixture("device"), &["--with", "totally-fake"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("unknown recipe"), "stderr: {stderr}");
-}
-
-#[test]
-fn rejects_blueprints_file_with_wrong_kind() {
-    // vulnerability.jsonl is not blueprint records.
-    let out = run_enrich(
-        &fixture("device"),
-        &[
-            "--with",
-            "blueprint-context",
-            "--blueprints",
-            &fixture_path("vulnerability"),
-        ],
-    );
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("kinds other than `blueprint`"),
-        "stderr: {stderr}"
-    );
-}
-
-#[test]
-fn enrich_then_filter_then_emit_pipeline() {
-    // Fleet-triage-shaped pipeline: attach blueprint context to
-    // devices, then keep only devices in the Mac Fleet blueprint.
-    // Validates that enriched fields are visible to the filter
-    // primitive.
-    let mut enrich = Command::cargo_bin("stave").expect("stave");
-    enrich.args([
-        "enrich",
-        "--with",
-        "blueprint-context",
-        "--blueprints",
-        &fixture_path("blueprint"),
-    ]);
-    enrich.env("STAVE_AUDIT", "off");
-    enrich.stdin(Stdio::piped()).stdout(Stdio::piped());
-    let mut enrich_child = enrich.spawn().expect("spawn enrich");
-    enrich_child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(fixture("device").as_bytes())
-        .unwrap();
-    drop(enrich_child.stdin.take());
-    let enrich_out = enrich_child.wait_with_output().expect("wait enrich");
-    assert!(
-        enrich_out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&enrich_out.stderr)
-    );
-
-    let mut filter = Command::cargo_bin("stave").expect("stave");
-    filter.args([
-        "filter",
-        "--where",
-        r#"has(record.blueprint) && record.blueprint != null && blueprint.name == "Mac Fleet""#,
-    ]);
-    filter.env("STAVE_AUDIT", "off");
-    filter.stdin(Stdio::piped()).stdout(Stdio::piped());
-    let mut filter_child = filter.spawn().expect("spawn filter");
-    filter_child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(&enrich_out.stdout)
-        .unwrap();
-    drop(filter_child.stdin.take());
-    let filter_out = filter_child.wait_with_output().expect("wait filter");
-    assert!(
-        filter_out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&filter_out.stderr)
-    );
-
-    let kept = parse_jsonl(&String::from_utf8(filter_out.stdout).unwrap());
-    let names: Vec<&str> = kept
-        .iter()
-        .map(|r| r["device_name"].as_str().unwrap())
-        .collect();
-    assert!(names.contains(&"kestrel"), "names: {names:?}");
-    assert!(names.contains(&"rocinante"), "names: {names:?}");
-    assert!(!names.contains(&"osprey"), "names: {names:?}");
-    assert!(!names.contains(&"skiff-ipad"), "names: {names:?}");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stdout_of(&out).is_empty());
 }

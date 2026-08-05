@@ -1,25 +1,28 @@
-# examples — fixtures, asserts, recipes
+# examples: fixtures, asserts, recipes
 
-Track B-style regression surface, ported from sidestep and
-re-instantiated on iru nouns.
+Regression surface for the v0.1 primitive layer, ported from bloomctl
+and re-instantiated on Wiz security-graph nouns.
 
 ```
 examples/
 ├── fixtures/
-│   ├── device.jsonl         4 records (2 blueprints + 1 orphan, mixed platforms,
-│   │                        one stale last_check_in, asset tags on 2)
-│   ├── blueprint.jsonl      2 records (join targets for blueprint-context)
-│   ├── vulnerability.jsonl  3 records covering the severity range
-│   └── audit-event.jsonl    2 records (occurred_at timestamps)
+│   ├── issue.jsonl                 4 records (4 severities, 3 with an
+│   │                               entitySnapshot, 1 resolved with none)
+│   ├── vulnerability_finding.jsonl 5 records (4 severities, 2 sharing HIGH
+│   │                               so the rank tiebreak is exercised)
+│   ├── cloud_resource.jsonl        4 records (2 accounts, 1 orphan subscription)
+│   └── cloud_account.jsonl         2 records (join targets: AWS + Azure)
 ├── asserts/
-│   ├── 01-round-trip.sh         parse + filter(_kind) + emit is byte-identical
-│   ├── 02-cross-kind-enrich.sh  device.blueprint_id ↔ blueprint.id joins work,
-│   │                            orphans yield null
-│   └── 03-rank-stability.sh     severity ranking is deterministic, critical first
+│   ├── _lib.sh                     shared helpers (binary probe, normalize)
+│   ├── 01-round-trip.sh            parse + filter(_kind) + emit is lossless
+│   ├── 02-cross-kind-enrich.sh     cloud_resource → cloud_account join,
+│   │                               orphan subscription yields null
+│   └── 03-rank-stability.sh        severity ordering is deterministic,
+│                                   CRITICAL first, tiebreak on firstDetectedAt
 └── recipes/
-    ├── inventory.sh         list devices | enrich blueprint-context | emit md
-    ├── stale-devices.sh     list devices | filter last_check_in staleness | emit md
-    └── vuln-triage.sh       list vulnerabilities | filter severity | emit md
+    ├── issue-triage.sh             list issue | entity-hoist | filter severity | md
+    ├── vuln-exposure.sh            list vulnerability_finding | severity-roll-up | md
+    └── resource-inventory.sh       list cloud_resource | account-context | md
 ```
 
 ## Running
@@ -28,26 +31,49 @@ examples/
 make -C examples assert     # jq + shell, no network, no credentials
 ```
 
-The asserts simulate the primitive flows in jq so they run without the
-binary; the same fixtures back the Rust integration tests
-(`crates/stave-cli/tests/`), so the two surfaces cross-check each
-other.
+The asserts are jq simulations of the primitive flows, so they run with
+no binary and no tenant. When a locally built binary is present
+(`cargo build`, giving `target/debug/stave`) each simulation is also
+cross-checked against what the real primitive emits on the same
+fixtures. A binary that predates a recipe is reported and skipped
+rather than failed, so a mid-rewrite tree still gets a green signal
+from the jq half.
 
-The recipes require a configured `stave` (token + subdomain with
-read permissions) and demonstrate primitive composition — they are the
-seed shapes for the v0.2 composite-verb question (charter F3).
+The same fixtures back the Rust integration tests in
+`crates/stave-cli/tests/`, so the two surfaces cross-check each other.
+
+The recipes need a configured `stave` (client credentials with read
+scopes) and demonstrate primitive composition. They are the seed shapes
+for the v0.2 composite-verb question; see `recipes/README.md`.
+
+## What each assert proves
+
+| Assert | Claim |
+|---|---|
+| `01-round-trip` | Every fixture parses, and `filter --where '_kind == "X"'` over a single-kind stream returns it unchanged. Catches renamed fields, wrong types, a `_kind` that disagrees with its filename, and any drift between the jq contract and `stave filter`. |
+| `02-cross-kind-enrich` | The `account-context` join resolves `cloud_resource.subscriptionExternalId` against `cloud_account.externalId`, attaches the account summary (id, name, externalId, cloudProvider, status), yields `account: null` for a subscription no account claims, and leaves records of other kinds untouched. |
+| `03-rank-stability` | The severity ordering is deterministic across runs, CRITICAL sorts first and LOW last, and equal severities break the tie on `firstDetectedAt` descending. The severity-int mapping mirrors `enrich::severity_rank`, so a change on either side shows up here. |
 
 ## Fixture notes
 
 | kind | what it exercises |
 |---|---|
-| `device` | join key (`blueprint_id`), orphan case, `last_check_in` promotion, `has(record.asset_tag)` absence checks, platform variety |
-| `blueprint` | join target, DRF-wrapper list shape |
-| `vulnerability` | severity enum + rank ordering, `*_date` timestamp promotion |
-| `audit_event` | `*_at` timestamp promotion, action search field |
+| `issue` | the four severities; `entitySnapshot` for the `entity-hoist` recipe, including a resolved issue whose snapshot is `null`; `createdAt`/`updatedAt`/`resolvedAt`/`dueAt` timestamp promotion, with nulls on the fields Wiz leaves empty |
+| `vulnerability_finding` | `vendorSeverity` as the severity carrier (not `severity`); severity rank ordering with a real tiebreak; `firstDetectedAt` and `lastDetectedAt` promotion; a mix of OPEN / IN_PROGRESS / RESOLVED |
+| `cloud_resource` | the join key (`subscriptionExternalId`), two owned subscriptions, one orphan reference, and two cloud platforms |
+| `cloud_account` | the join target (`externalId`), an AWS numeric account id beside an Azure subscription GUID, and two connection states |
 
 **Fixtures are synthetic by policy.** Never regenerate them by copying
-live payloads — real serials, UDIDs, device names, and emails must not
-enter git (SECURITY.md "Tenant Data Hygiene"). If a live payload
+live payloads: real account ids, resource names, subscription ids, and
+emails must not enter git (SECURITY.md "Tenant Data Hygiene"). Every
+value here is invented: `example-corp-*` names, a reserved-looking
+`123456789012` account id, GUIDs from a zeroed range. If a live payload
 disagrees with a fixture's *shape*, synthesize new placeholder values
-that match the corrected shape, and fix the kind table together with it.
+matching the corrected shape and fix the kind table together with it.
+
+One deliberate omission: `vulnerability_finding` records carry no
+`subscriptionExternalId`, because
+`crates/stave-api/ops/list_vulnerability_findings.graphql` does not
+select one. Fixtures mirror the curated selection set exactly; adding a
+field the query never returns would make the regression contract lie. If
+that operation grows the field, add it here in the same change.

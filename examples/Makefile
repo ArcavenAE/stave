@@ -1,11 +1,15 @@
-# stave Track B — spine fixtures + 3 asserts (bd aae-orc-kdz1).
+# stave examples: synthetic Wiz fixtures + 3 asserts.
 #
-# Asserts simulate v0.1 primitive flows in jq + shell so they run today,
-# pre-Rust. They become regression input for the eventual Rust implementation:
-# the Rust output of `list | filter | emit` etc. should match these jq
-# simulations on the same fixtures.
+# The asserts simulate the v0.1 primitive flows in jq + shell, so they run
+# with no binary, no network, and no tenant credentials. When a built
+# binary is present under ../target they additionally cross-check the real
+# primitive's output against the simulation on the same fixtures, which is
+# the regression contract in both directions.
+#
+#   make assert        # jq simulation, plus a cross-check if a binary exists
+#   make assert-built  # build the binary first, then cross-check for real
 
-.PHONY: assert assert-01 assert-02 assert-03
+.PHONY: assert assert-01 assert-02 assert-03 assert-built
 
 assert: assert-01 assert-02 assert-03
 	@echo
@@ -19,3 +23,7 @@ assert-02:
 
 assert-03:
 	@bash asserts/03-rank-stability.sh
+
+assert-built:
+	@cd .. && cargo build -p stave-cli
+	@$(MAKE) assert

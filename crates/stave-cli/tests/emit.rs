@@ -1,104 +1,267 @@
-//! End-to-end tests for `stave emit`.
+//! End-to-end coverage for `stave emit`.
 //!
-//! These tests exercise the binary via `assert_cmd` and verify that the
-//! v0.1 stream contract round-trips cleanly through `--format jsonl` and
-//! that `--format md` yields a markdown table with the expected columns.
+//! `emit` is the sink of the stream contract, so these tests pin the
+//! contract itself: `jsonl` round-trips a record byte-for-byte in
+//! meaning, `md` renders the four columns the kind table can supply for
+//! any kind, and `json` collects the stream into one array. A kind that
+//! declares no severity or timestamp renders blank cells rather than
+//! failing, because the v0.1 kind metadata is provisional (charter F1)
+//! and a wrong guess must degrade instead of breaking a pipeline.
 
-use std::process::Command;
+mod common;
 
-use assert_cmd::cargo::CommandCargoExt;
+use common::{Sandbox, fixture, jsonl, run_with_stdin, stderr_of, stdout_of};
+use serde_json::Value;
 
-const DEVICE_LINE: &str = r#"{"_kind":"device","_source":{"operation_id":"get_devices","response_index":0,"fetched_at":"2026-07-15T10:00:00Z"},"device_id":"dev_001","device_name":"kestrel","platform":"Mac","last_check_in":"2026-07-15T09:12:00Z"}"#;
+/// One synthetic record per kind, the mixed stream `emit` is meant to
+/// render. Written out literally rather than read from a fixture so the
+/// expected column values sit next to the assertions.
+const ISSUE_LINE: &str = r#"{"_kind":"issue","_source":{"operation_id":"list_issues","response_index":0,"fetched_at":"2026-08-05T10:00:00Z"},"id":"issue_01","type":"TOXIC_COMBINATION","severity":"CRITICAL","status":"OPEN","createdAt":"2026-07-28T09:15:00Z"}"#;
 
-const VULN_LINE: &str = r#"{"_kind":"vulnerability","_source":{"operation_id":"get_vulnerability_management_vulnerabilities","response_index":0,"fetched_at":"2026-07-15T10:00:00Z"},"cve_id":"CVE-2026-1111","severity":"critical","first_detection_date":"2026-07-10T00:00:00Z"}"#;
+const FINDING_LINE: &str = r#"{"_kind":"vulnerability_finding","_source":{"operation_id":"list_vulnerability_findings","response_index":0,"fetched_at":"2026-08-05T10:00:00Z"},"id":"vf_01","name":"CVE-2026-10001","vendorSeverity":"CRITICAL","firstDetectedAt":"2026-07-20T02:00:00Z"}"#;
+
+const RESOURCE_LINE: &str = r#"{"_kind":"cloud_resource","_source":{"operation_id":"list_cloud_resources","response_index":0,"fetched_at":"2026-08-05T10:00:00Z"},"id":"res_01","name":"example-corp-audit-logs","type":"BUCKET","cloudPlatform":"AWS"}"#;
+
+fn emit(input: &str, args: &[&str]) -> std::process::Output {
+    let sandbox = Sandbox::new();
+    run_with_stdin(
+        sandbox
+            .cmd()
+            .arg("emit")
+            .args(args)
+            .env("STAVE_AUDIT", "off"),
+        input,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// jsonl
+// ---------------------------------------------------------------------------
 
 #[test]
-fn emit_jsonl_passes_records_through() {
-    let input = format!("{DEVICE_LINE}\n{VULN_LINE}\n");
-    let mut cmd = Command::cargo_bin("stave").expect("stave binary");
-    cmd.args(["emit", "--format", "jsonl"]);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        use std::io::Write;
-        stdin.write_all(input.as_bytes()).unwrap();
-    }
-    let out = child.wait_with_output().expect("wait");
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn jsonl_passes_records_through() {
+    let input = format!("{ISSUE_LINE}\n{FINDING_LINE}\n");
+    let out = emit(&input, &["--format", "jsonl"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
 
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2);
-    assert!(lines[0].contains("\"_kind\":\"device\""));
-    assert!(lines[0].contains("\"device_id\":\"dev_001\""));
-    assert!(lines[1].contains("\"_kind\":\"vulnerability\""));
-    assert!(lines[1].contains("\"cve_id\":\"CVE-2026-1111\""));
+    let records = jsonl(&stdout_of(&out));
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["_kind"], "issue");
+    assert_eq!(records[0]["id"], "issue_01");
+    assert_eq!(records[0]["_source"]["operation_id"], "list_issues");
+    assert_eq!(records[1]["_kind"], "vulnerability_finding");
+    assert_eq!(records[1]["name"], "CVE-2026-10001");
 }
 
 #[test]
-fn emit_md_renders_a_markdown_table() {
-    let input = format!("{DEVICE_LINE}\n{VULN_LINE}\n");
-    let mut cmd = Command::cargo_bin("stave").expect("stave binary");
-    cmd.args(["emit", "--format", "md"]);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn");
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        use std::io::Write;
-        stdin.write_all(input.as_bytes()).unwrap();
-    }
-    let out = child.wait_with_output().expect("wait");
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+fn jsonl_round_trips_a_nested_entity_snapshot() {
+    // The issue fixture is the only kind with a nested object, and a
+    // lossy passthrough there would break `entity-hoist` downstream.
+    let out = emit(&fixture("issue"), &["--format", "jsonl"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let records = jsonl(&stdout_of(&out));
+    assert_eq!(records.len(), 4);
+    assert_eq!(
+        records[0]["entitySnapshot"]["subscriptionExternalId"],
+        "123456789012"
     );
-
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let mut lines = stdout.lines();
-    assert_eq!(lines.next(), Some("| _kind | id | severity | timestamp |"));
-    assert_eq!(lines.next(), Some("|---|---|---|---|"));
-    let row1 = lines.next().expect("row 1");
-    assert!(row1.contains("device"));
-    assert!(row1.contains("dev_001"), "id column uses device_id: {row1}");
     assert!(
-        row1.contains("2026-07-15T09:12:00Z"),
-        "timestamp column uses last_check_in: {row1}"
+        records[3]["entitySnapshot"].is_null(),
+        "an explicit null must stay null: {}",
+        records[3]
     );
-    let row2 = lines.next().expect("row 2");
-    assert!(row2.contains("vulnerability"));
-    assert!(row2.contains("CVE-2026-1111"));
-    assert!(row2.contains("critical"));
-    assert!(row2.contains("2026-07-10T00:00:00Z"));
 }
 
 #[test]
-fn emit_passes_through_empty_input() {
-    let mut cmd = Command::cargo_bin("stave").expect("stave binary");
-    cmd.args(["emit", "--format", "jsonl"]);
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn");
-    drop(child.stdin.take()); // close stdin immediately
-    let out = child.wait_with_output().expect("wait");
-    assert!(out.status.success());
+fn an_empty_stream_emits_nothing_and_succeeds() {
+    let out = emit("", &["--format", "jsonl"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(out.stdout.is_empty());
 }
 
 #[test]
-fn list_rejects_unknown_kind() {
-    let mut cmd = Command::cargo_bin("stave").expect("stave binary");
-    cmd.args(["list", "definitelyNotAKind"]);
-    let out = cmd.output().expect("output");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // clap rejects with `error: invalid value` per PossibleValuesParser.
-    assert!(stderr.to_lowercase().contains("invalid value"));
+fn blank_lines_in_the_input_are_skipped() {
+    let input = format!("\n{ISSUE_LINE}\n\n{FINDING_LINE}\n\n");
+    let out = emit(&input, &["--format", "jsonl"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).lines().count(), 2);
+}
+
+#[test]
+fn a_line_that_is_not_a_stream_record_fails_loudly() {
+    let out = emit("{\"not\":\"a record\"}\n", &["--format", "jsonl"]);
+    assert!(
+        !out.status.success(),
+        "a record without _kind/_source is not in the contract: {out:?}"
+    );
+    assert!(!stderr_of(&out).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// md
+// ---------------------------------------------------------------------------
+
+#[test]
+fn md_renders_the_kind_table_columns_for_each_kind() {
+    let input = format!("{ISSUE_LINE}\n{FINDING_LINE}\n");
+    let out = emit(&input, &["--format", "md"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let stdout = stdout_of(&out);
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("| _kind | id | severity | timestamp |"));
+    assert_eq!(lines.next(), Some("|---|---|---|---|"));
+
+    let issue_row = lines.next().expect("issue row");
+    assert!(issue_row.contains("issue_01"), "{issue_row}");
+    assert!(issue_row.contains("CRITICAL"), "{issue_row}");
+    assert!(
+        issue_row.contains("2026-07-28T09:15:00Z"),
+        "the timestamp column reads createdAt for an issue: {issue_row}"
+    );
+
+    let finding_row = lines.next().expect("finding row");
+    assert!(finding_row.contains("vf_01"), "{finding_row}");
+    assert!(
+        finding_row.contains("CRITICAL"),
+        "the severity column reads vendorSeverity for a finding: {finding_row}"
+    );
+    assert!(
+        finding_row.contains("2026-07-20T02:00:00Z"),
+        "the timestamp column reads firstDetectedAt for a finding: {finding_row}"
+    );
+}
+
+#[test]
+fn md_leaves_cells_blank_for_a_kind_with_no_severity_or_timestamp() {
+    // cloud_resource declares neither. Provisional kind metadata must
+    // degrade to blanks, never to an error (charter F1).
+    let out = emit(&format!("{RESOURCE_LINE}\n"), &["--format", "md"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let row = stdout_of(&out)
+        .lines()
+        .nth(2)
+        .expect("one data row")
+        .to_string();
+    assert_eq!(
+        row, "| cloud_resource | res_01 |  |  |",
+        "unexpected row shape: {row}"
+    );
+}
+
+#[test]
+fn md_renders_a_header_even_for_an_empty_stream() {
+    let out = emit("", &["--format", "md"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    assert_eq!(
+        stdout.lines().count(),
+        2,
+        "header and rule only: {stdout:?}"
+    );
+}
+
+#[test]
+fn md_emits_one_header_for_a_whole_fixture() {
+    let out = emit(&fixture("vulnerability_finding"), &["--format", "md"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    assert_eq!(
+        stdout
+            .matches("| _kind | id | severity | timestamp |")
+            .count(),
+        1,
+        "the header must land once, ahead of the rows: {stdout}"
+    );
+    assert_eq!(stdout.lines().count(), 7, "2 header lines plus 5 records");
+}
+
+// ---------------------------------------------------------------------------
+// json
+// ---------------------------------------------------------------------------
+
+#[test]
+fn json_collects_the_stream_into_one_pretty_array() {
+    let input = format!("{ISSUE_LINE}\n{FINDING_LINE}\n");
+    let out = emit(&input, &["--format", "json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let stdout = stdout_of(&out);
+    assert!(
+        stdout.contains("\n  {"),
+        "output must be pretty-printed: {stdout}"
+    );
+    let parsed: Value = serde_json::from_str(&stdout).expect("one JSON document");
+    let array = parsed.as_array().expect("a JSON array");
+    assert_eq!(array.len(), 2);
+    assert_eq!(array[0]["_kind"], "issue");
+    assert_eq!(array[1]["_kind"], "vulnerability_finding");
+}
+
+#[test]
+fn json_renders_an_empty_stream_as_an_empty_array() {
+    let out = emit("", &["--format", "json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let parsed: Value = serde_json::from_str(stdout_of(&out).trim()).expect("one JSON document");
+    assert_eq!(parsed.as_array().map(Vec::len), Some(0));
+}
+
+// ---------------------------------------------------------------------------
+// defaults
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_default_format_on_a_pipe_is_jsonl() {
+    // TTY auto-detection, never auto-coercion: with stdout piped (which
+    // is what a pipeline and an agent both see), the machine-readable
+    // form has to be the default.
+    let out = emit(&format!("{ISSUE_LINE}\n"), &[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    assert!(
+        !stdout.contains("| _kind |"),
+        "a pipe must not get a markdown table: {stdout}"
+    );
+    assert_eq!(jsonl(&stdout).len(), 1);
+}
+
+#[test]
+fn emit_writes_nothing_to_stderr_on_the_happy_path() {
+    // Rule of silence: stdout carries the contract, and a successful run
+    // has nothing to say.
+    let out = emit(&format!("{ISSUE_LINE}\n"), &["--format", "jsonl"]);
+    assert!(out.status.success());
+    assert!(
+        out.stderr.is_empty(),
+        "unexpected chatter: {}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
+fn emit_leaves_no_audit_line() {
+    // `emit` is a formatter, not an operation. Auditing it would add a
+    // line per pipeline stage without adding a fact.
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox.cmd().args(["emit", "--format", "jsonl"]),
+        &format!("{ISSUE_LINE}\n"),
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        sandbox.audit_lines().is_empty(),
+        "emit must not audit: {:?}",
+        sandbox.audit_lines()
+    );
+}
+
+#[test]
+fn rejects_an_unknown_format() {
+    let out = emit("", &["--format", "yaml"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        stderr_of(&out).to_lowercase().contains("invalid value"),
+        "{}",
+        stderr_of(&out)
+    );
 }

@@ -1,0 +1,2 @@
+{"_kind":"cloud_account","_source":{"operation_id":"list_cloud_accounts","response_index":0,"fetched_at":"2026-08-05T10:00:00Z"},"id":"acct_01","name":"example-corp-prod","externalId":"123456789012","cloudProvider":"AWS","status":"CONNECTED"}
+{"_kind":"cloud_account","_source":{"operation_id":"list_cloud_accounts","response_index":1,"fetched_at":"2026-08-05T10:00:00Z"},"id":"acct_02","name":"example-corp-sandbox","externalId":"10000000-0000-4000-8000-000000000002","cloudProvider":"Azure","status":"PARTIALLY_CONNECTED"}

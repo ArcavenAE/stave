@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Rust CLI for the iru (Kandji) Endpoint Management API. Agent-first ergonomics, audit-trail-as-feature."
+description = "Rust CLI for the Wiz GraphQL API. Agent-first ergonomics, audit-trail-as-feature."
 
 [[bin]]
 name = "stave"
@@ -27,8 +27,19 @@ tokio.workspace = true
 chrono.workspace = true
 cel-interpreter.workspace = true
 sha2.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+toml.workspace = true
+
+# Hidden secret entry at an interactive prompt. Kept crate-local: no
+# other crate in the workspace reads a terminal.
+rpassword = "7"
 
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
 wiremock.workspace = true
+tempfile.workspace = true
+# Builds the fake JWTs the endpoint-derivation tests need (a `dc` claim
+# in an unsigned payload). Never used to verify anything.
+base64.workspace = true

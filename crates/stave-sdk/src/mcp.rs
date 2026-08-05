@@ -34,9 +34,17 @@ pub const MCP_URL_ENV: &str = "STAVE_MCP_URL";
 /// case-insensitively.
 pub fn is_read_only_tool(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase().replace('_', "-");
-    ["get-", "list-", "search-", "read-", "query-", "describe-", "find-"]
-        .iter()
-        .any(|p| normalized.starts_with(p))
+    [
+        "get-",
+        "list-",
+        "search-",
+        "read-",
+        "query-",
+        "describe-",
+        "find-",
+    ]
+    .iter()
+    .any(|p| normalized.starts_with(p))
 }
 
 /// Resolve the MCP endpoint: env → config (`[mcp] url`) → default.

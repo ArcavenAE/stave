@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::error::{StaveError, Result};
+use crate::error::{Result, StaveError};
 
 /// One record in a stave JSON-line stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -170,8 +170,8 @@ pub fn resolve_token_url() -> Result<ResolvedParam> {
 }
 
 /// Build the tenant GraphQL endpoint from a data-center identifier
-/// (the `dc` claim in a minted Wiz token), e.g. `us17` →
-/// `https://api.us17.app.wiz.io/graphql`.
+/// (the `dc` claim in a minted Wiz token), e.g. `example1` →
+/// `https://api.example1.app.wiz.io/graphql`.
 pub fn api_url_from_dc(dc: &str) -> String {
     format!("https://api.{dc}.app.wiz.io/graphql")
 }
@@ -488,8 +488,8 @@ mod tests {
     #[test]
     fn api_url_from_dc_builds_graphql_endpoint() {
         assert_eq!(
-            api_url_from_dc("us17"),
-            "https://api.us17.app.wiz.io/graphql"
+            api_url_from_dc("example1"),
+            "https://api.example1.app.wiz.io/graphql"
         );
     }
 

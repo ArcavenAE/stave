@@ -15,6 +15,4 @@ pre-push:
     test:
       run: cargo test --workspace --all-targets
     doctest:
-      # See ci.yml — `--exclude stave-api` skips progenitor's
-      # generated illustrative doctests.
-      run: cargo test --workspace --doc --exclude stave-api
+      run: cargo test --workspace --doc

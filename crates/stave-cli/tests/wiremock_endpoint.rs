@@ -1,400 +1,1079 @@
-//! End-to-end integration tests against a wiremock mock server.
+//! End-to-end coverage through the binary against a wiremock server.
 //!
-//! Closes three loops at once:
-//!   * the SDK base-URL override (`STAVE_BASE_URL`) actually
-//!     reaches the network layer, with path/query/header construction
-//!     matching the OpenAPI spec.
-//!   * both iru response shapes (bare array + DRF `{results: [...]}`
-//!     wrapper) stream correctly through `list`.
-//!   * the write-guard refuses mutating operations before any request
-//!     is sent, and `--allow-write` deliberately opens the gate.
+//! Closes four loops:
 //!
-//! Pattern: `#[tokio::test]` spins up a `MockServer`, mounts a `Mock`
-//! with explicit method/path/query/header expectations, then runs the
-//! `stave` CLI synchronously via `assert_cmd` with
-//! `STAVE_BASE_URL=<server.uri()>`. Mock expectations are verified
-//! on `MockServer::drop` — failure to match raises a panic with the
-//! actual requests received.
+//!   * `STAVE_BASE_URL` reaches the network layer, and a GraphQL request
+//!     is posted as `{"query", "variables"}` with a bearer header.
+//!   * `list` pages a connection: the second request carries the first
+//!     response's `endCursor` as `variables.after`.
+//!   * the write-guard refuses a mutating document before anything is
+//!     sent (asserted with `expect(0)`, which wiremock verifies on drop),
+//!     and `--allow-write` deliberately opens the gate.
+//!   * the OAuth mint runs against the mocked token endpoint with
+//!     `grant_type=client_credentials` and `audience=wiz-api`, caches the
+//!     result, and the audit line records where the credential and the
+//!     endpoint each came from.
+//!
+//! Pattern: `#[tokio::test]` starts a `MockServer`, mounts `Mock`s with
+//! explicit method, path, header, and body expectations, then runs the
+//! CLI synchronously through the sandbox harness. Every response body is
+//! synthetic.
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
-use assert_cmd::cargo::CommandCargoExt;
+use common::{
+    Sandbox, connection_page, jsonl, request_variables, run, run_with_stdin, stderr_of, stdout_of,
+};
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-static TEMPDIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn tempdir(prefix: &str) -> PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = TEMPDIR_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "stave-{prefix}-{}-{n}-{nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Two synthetic issue nodes, shaped like `list_issues` selects them.
+fn issue_nodes() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "issue_01",
+            "type": "TOXIC_COMBINATION",
+            "severity": "CRITICAL",
+            "status": "OPEN",
+            "createdAt": "2026-07-28T09:15:00Z",
+            "entitySnapshot": {
+                "id": "ent_01",
+                "type": "BUCKET",
+                "name": "example-corp-audit-logs",
+                "cloudPlatform": "AWS",
+                "subscriptionExternalId": "123456789012",
+            },
+        }),
+        json!({
+            "id": "issue_02",
+            "type": "CLOUD_CONFIGURATION",
+            "severity": "HIGH",
+            "status": "IN_PROGRESS",
+            "createdAt": "2026-07-30T14:40:00Z",
+            "entitySnapshot": Value::Null,
+        }),
+    ]
 }
 
-fn read_audit_lines(dir: &PathBuf) -> Vec<Value> {
-    let mut out = Vec::new();
-    let read = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return out,
-    };
-    for entry in read.flatten() {
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let body = std::fs::read_to_string(entry.path()).unwrap();
-        for line in body.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            out.push(serde_json::from_str(line).expect("audit line is JSON"));
-        }
-    }
-    out
+fn third_issue_node() -> Value {
+    json!({
+        "id": "issue_03",
+        "type": "CLOUD_CONFIGURATION",
+        "severity": "MEDIUM",
+        "status": "OPEN",
+        "createdAt": "2026-08-02T06:20:00Z",
+        "entitySnapshot": Value::Null,
+    })
 }
 
-/// API-shape lines (those carrying an `operation` block) — distinct
-/// from verb-shape lines emitted by `filter` / `enrich`.
-fn api_audit_lines(audit_dir: &PathBuf) -> Vec<Value> {
-    read_audit_lines(audit_dir)
-        .into_iter()
-        .filter(|v| v.get("operation").is_some())
-        .collect()
+/// A GraphQL endpoint on the mock server. Using a path rather than the
+/// bare root keeps the matchers legible and mirrors the real tenant
+/// endpoint, which ends in `/graphql`.
+fn graphql_url(server: &MockServer) -> String {
+    format!("{}/graphql", server.uri())
 }
 
-fn cmd() -> Command {
-    let mut c = Command::cargo_bin("stave").expect("stave binary built");
-    // Hermetic: no ambient subdomain/region/config/write opt-ins.
-    c.env_remove("STAVE_SUBDOMAIN")
-        .env_remove("STAVE_REGION")
-        .env_remove("STAVE_ALLOW_WRITE")
-        .env("STAVE_CONFIG", "/nonexistent/stave-test-config.toml");
-    c
-}
-
-fn devices_bare_array() -> Value {
-    json!([
-        {
-            "device_id": "dev_001",
-            "device_name": "kestrel",
-            "platform": "Mac",
-            "os_version": "15.5",
-            "last_check_in": "2026-07-15T09:12:00Z",
-        },
-        {
-            "device_id": "dev_002",
-            "device_name": "osprey",
-            "platform": "Mac",
-            "os_version": "14.7.1",
-            "last_check_in": "2026-05-01T03:40:00Z",
-        },
-    ])
-}
+// ---------------------------------------------------------------------------
+// the request stave actually posts
+// ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn list_devices_streams_bare_array_and_audits() {
+async fn api_posts_a_graphql_document_and_prints_the_data_block() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/devices"))
-        .and(query_param("limit", "2"))
-        .and(header("authorization", "Bearer fake-tok"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(devices_bare_array()))
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", "Bearer example-access-token"))
+        .and(body_string_contains("issuesV2"))
+        .and(body_string_contains(r#""first":2"#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
         .expect(1)
         .mount(&server)
         .await;
 
-    let audit_dir = tempdir("audit");
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["api", "list_issues", "--var", "first=2"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
 
-    let out = cmd()
-        .args(["list", "device", "--param", "limit=2"])
-        .env("STAVE_API_TOKEN", "fake-tok")
-        .env("STAVE_BASE_URL", server.uri())
-        .env("STAVE_AUDIT_DIR", &audit_dir)
-        .output()
-        .unwrap();
+    assert!(out.status.success(), "api call failed: {}", stderr_of(&out));
+    let data: Value = serde_json::from_str(&stdout_of(&out)).expect("stdout is one JSON object");
+    let nodes = data["issuesV2"]["nodes"]
+        .as_array()
+        .expect("data carries the connection");
+    assert_eq!(nodes.len(), 2, "{data}");
+    assert_eq!(nodes[0]["id"], "issue_01");
+}
+
+#[tokio::test]
+async fn var_values_that_parse_as_json_are_sent_as_json_scalars() {
+    // `--var first=2` must send the number 2, not the string "2", or the
+    // GraphQL variable coercion fails on the server side.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            vec![],
+            None,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args([
+            "api",
+            "list_issues",
+            "--var",
+            "first=2",
+            "--var",
+            "status=OPEN",
+        ])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let requests = server.received_requests().await.expect("recording enabled");
+    let vars = request_variables(&requests[0].body);
+    assert_eq!(vars["first"], json!(2), "numbers stay numbers: {vars}");
+    assert_eq!(
+        vars["status"],
+        json!("OPEN"),
+        "unparseable values become strings: {vars}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// pagination
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_pages_a_connection_and_sends_the_cursor_on_the_second_call() {
+    let server = MockServer::start().await;
+
+    // First page: asked for 3, hands back 2 and says there is more.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(r#""first":3"#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            Some("cursor-page-2"),
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Second page: the remaining 1, and the connection ends.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(r#""after":"cursor-page-2""#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            vec![third_issue_node()],
+            None,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "3"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let records = jsonl(&stdout_of(&out));
+    assert_eq!(records.len(), 3, "both pages must stream: {records:?}");
+    assert_eq!(records[0]["_kind"], "issue");
+    assert_eq!(records[2]["id"], "issue_03");
+    // `_source.response_index` counts across pages, not within one.
+    assert_eq!(records[2]["_source"]["response_index"], 2);
+    assert_eq!(records[2]["_source"]["operation_id"], "list_issues");
+
+    let requests = server.received_requests().await.expect("recording enabled");
+    assert_eq!(requests.len(), 2, "one request per page");
+    let first = request_variables(&requests[0].body);
+    assert!(
+        first.get("after").is_none(),
+        "the first call has no cursor: {first}"
+    );
+    let second = request_variables(&requests[1].body);
+    assert_eq!(second["after"], json!("cursor-page-2"));
+    assert_eq!(
+        second["first"],
+        json!(1),
+        "the second page asks only for the shortfall: {second}"
+    );
+}
+
+#[tokio::test]
+async fn list_stops_at_the_limit_without_asking_for_another_page() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            Some("cursor-page-2"),
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "1"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(jsonl(&stdout_of(&out)).len(), 1);
+    // expect(1), verified on drop: the cursor was available but unused.
+}
+
+#[tokio::test]
+async fn list_treats_an_empty_page_as_the_end_of_the_connection() {
+    // A connection that keeps promising another page while returning
+    // nothing would loop forever; the client breaks instead.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            vec![],
+            Some("cursor-that-never-ends"),
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "50"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stdout_of(&out).trim().is_empty(), "no records to emit");
+}
+
+// ---------------------------------------------------------------------------
+// error surfaces
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn graphql_errors_array_fails_the_call_with_the_servers_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": Value::Null,
+            "errors": [
+                {"message": "Cannot query field 'dueAt' on type 'Issue'"},
+                {"message": "Variable '$first' is never used"},
+            ],
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["api", "list_issues"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+
+    assert!(
+        !out.status.success(),
+        "a GraphQL errors array is a failed call: {out:?}"
+    );
+    let err = stderr_of(&out);
+    assert!(err.contains("GraphQL:"), "{err}");
+    assert!(err.contains("Cannot query field 'dueAt'"), "{err}");
+    assert!(
+        err.contains("Variable '$first' is never used"),
+        "every message must survive: {err}"
+    );
+}
+
+#[tokio::test]
+async fn graphql_error_is_recorded_as_its_own_audit_outcome() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": Value::Null,
+            "errors": [{"message": "Field 'issuesV2' is deprecated"}],
+        })))
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["api", "list_issues"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(!out.status.success());
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1, "a failed call still audits: {api:?}");
+    assert_eq!(api[0]["result"], "graphql_error");
+    assert_eq!(
+        api[0]["response"]["status"], 200,
+        "GraphQL reports failure inside a 200"
+    );
+    assert_eq!(api[0]["response"]["items_returned"], 1, "one error message");
+}
+
+#[tokio::test]
+async fn a_non_success_status_surfaces_as_an_http_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["api", "list_issues"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("HTTP 401"), "{err}");
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1);
+    assert_eq!(api[0]["result"], "http_error");
+    assert_eq!(api[0]["response"]["status"], 401);
+}
+
+// ---------------------------------------------------------------------------
+// write-guard on ad-hoc documents
+// ---------------------------------------------------------------------------
+
+const MUTATION_DOCUMENT: &str = r#"mutation ResolveOneIssue($id: ID!) {
+  updateIssue(input: {id: $id, patch: {status: RESOLVED}}) {
+    issue { id status }
+  }
+}"#;
+
+#[tokio::test]
+async fn adhoc_mutation_is_refused_before_any_request_is_sent() {
+    let server = MockServer::start().await;
+    // expect(0): the guard parses the document and refuses locally, so
+    // wiremock must see nothing. Verified when the server drops.
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["api", "--query", "-", "--var", "id=issue_01"])
+            .env("STAVE_ACCESS_TOKEN", "example-access-token")
+            .env("STAVE_BASE_URL", graphql_url(&server)),
+        MUTATION_DOCUMENT,
+    );
+
+    assert!(!out.status.success(), "the guard must refuse: {out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("write-guard"), "{err}");
+    assert!(
+        err.contains("ResolveOneIssue"),
+        "the refusal must name the operation it parsed: {err}"
+    );
+    assert!(err.contains("--allow-write"), "{err}");
+    assert!(err.contains("STAVE_ALLOW_WRITE"), "{err}");
+    assert!(
+        err.contains("stave config set allow_writes true"),
+        "all three opt-in routes must be named: {err}"
+    );
+}
+
+#[tokio::test]
+async fn adhoc_mutation_fires_with_allow_write_and_audits_as_a_mutation() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", "Bearer example-access-token"))
+        .and(body_string_contains("updateIssue"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"updateIssue": {"issue": {"id": "issue_01", "status": "RESOLVED"}}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args([
+                "api",
+                "--query",
+                "-",
+                "--var",
+                "id=issue_01",
+                "--allow-write",
+            ])
+            .env("STAVE_ACCESS_TOKEN", "example-access-token")
+            .env("STAVE_BASE_URL", graphql_url(&server)),
+        MUTATION_DOCUMENT,
+    );
 
     assert!(
         out.status.success(),
-        "list failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        "--allow-write must open the gate: {}",
+        stderr_of(&out)
     );
+    assert!(stdout_of(&out).contains("RESOLVED"), "{}", stdout_of(&out));
 
-    let stdout = std::str::from_utf8(&out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 2, "expected 2 records, got {lines:?}");
-    let first: Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(first.get("_kind").and_then(Value::as_str), Some("device"));
-    assert_eq!(
-        first.get("device_id").and_then(Value::as_str),
-        Some("dev_001")
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1, "a deliberate write still audits: {api:?}");
+    assert_eq!(api[0]["operation"]["method"], "mutation");
+    assert_eq!(api[0]["operation"]["id"], "ResolveOneIssue");
+    assert_eq!(api[0]["verb_phase"], "api");
+}
+
+#[tokio::test]
+async fn adhoc_mutation_fires_with_the_standing_env_opt_in() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"updateIssue": {"issue": {"id": "issue_01", "status": "RESOLVED"}}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["api", "--query", "-", "--var", "id=issue_01"])
+            .env("STAVE_ACCESS_TOKEN", "example-access-token")
+            .env("STAVE_BASE_URL", graphql_url(&server))
+            .env("STAVE_ALLOW_WRITE", "1"),
+        MUTATION_DOCUMENT,
     );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
 
-    let api = api_audit_lines(&audit_dir);
-    assert_eq!(api.len(), 1, "expected one API audit line, got {api:?}");
+#[tokio::test]
+async fn adhoc_mutation_fires_with_the_standing_config_opt_in() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"updateIssue": {"issue": {"id": "issue_01", "status": "RESOLVED"}}}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    sandbox.write_config(
+        r#"
+[default]
+allow_writes = true
+"#,
+    );
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["api", "--query", "-", "--var", "id=issue_01"])
+            .env("STAVE_ACCESS_TOKEN", "example-access-token")
+            .env("STAVE_BASE_URL", graphql_url(&server)),
+        MUTATION_DOCUMENT,
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
+
+#[tokio::test]
+async fn a_query_hiding_a_mutation_in_the_same_document_is_still_refused() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let document = "query ReadIssues { issuesV2 { nodes { id } } }\n\
+                    mutation Sneaky { deleteReport(id: \"rep_01\") { id } }";
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["api", "--query", "-"])
+            .env("STAVE_ACCESS_TOKEN", "example-access-token")
+            .env("STAVE_BASE_URL", graphql_url(&server)),
+        document,
+    );
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        stderr_of(&out).contains("write-guard"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[tokio::test]
+async fn an_unparseable_document_never_reaches_the_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["api", "--query", "-"])
+            .env("STAVE_ACCESS_TOKEN", "example-access-token")
+            .env("STAVE_BASE_URL", graphql_url(&server)),
+        "query { unbalanced",
+    );
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("GraphQL document"), "{err}");
+    assert!(err.contains("parse error"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// audit provenance
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn audit_line_records_the_v2_shape_for_a_curated_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1, "{api:?}");
     let line = &api[0];
     assert_eq!(line["schema_version"], 2);
     assert_eq!(line["verb_phase"], "list");
-    assert_eq!(line["synthesis_keys"][0], "device_id");
-    assert_eq!(line["operation"]["id"], "get_devices");
+    assert_eq!(line["synthesis_keys"][0], "id");
+    assert_eq!(line["operation"]["id"], "list_issues");
     assert_eq!(
-        line["invocation"]["auth_source"], "env",
-        "token came from STAVE_API_TOKEN"
+        line["operation"]["method"], "query",
+        "GraphQL operation type stands in for the HTTP method"
     );
+    assert_eq!(
+        line["operation"]["url_template"], "issuesV2",
+        "the connection root field is the closest thing to a route"
+    );
+    assert_eq!(line["operation"]["path_params"]["first"], 2);
+    assert_eq!(line["result"], "ok");
     assert_eq!(line["response"]["status"], 200);
     assert_eq!(line["response"]["items_returned"], 2);
-}
-
-#[tokio::test]
-async fn list_blueprints_unwraps_drf_results_wrapper() {
-    let server = MockServer::start().await;
-    let body = json!({
-        "count": 2,
-        "next": null,
-        "previous": null,
-        "results": [
-            {"id": "bp_001", "name": "Mac Fleet"},
-            {"id": "bp_002", "name": "Kiosk iPads"},
-        ]
-    });
-    Mock::given(method("GET"))
-        .and(path("/api/v1/blueprints"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let audit_dir = tempdir("audit");
-
-    let out = cmd()
-        .args(["list", "blueprint"])
-        .env("STAVE_API_TOKEN", "fake-tok")
-        .env("STAVE_BASE_URL", server.uri())
-        .env("STAVE_AUDIT_DIR", &audit_dir)
-        .output()
-        .unwrap();
     assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let stdout = std::str::from_utf8(&out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(
-        lines.len(),
-        2,
-        "wrapper response must yield one record per results element, got {lines:?}"
-    );
-    let first: Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(
-        first.get("_kind").and_then(Value::as_str),
-        Some("blueprint")
-    );
-}
-
-#[tokio::test]
-async fn list_users_records_pagination_cursor_in_audit() {
-    let server = MockServer::start().await;
-    let body = json!({
-        "next": "https://tenant.api.kandji.io/api/v1/users?cursor=abc123",
-        "previous": null,
-        "results": [ {"id": 7, "email": "amos@example.com"} ]
-    });
-    Mock::given(method("GET"))
-        .and(path("/api/v1/users"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let audit_dir = tempdir("audit");
-
-    let out = cmd()
-        .args(["list", "user"])
-        .env("STAVE_API_TOKEN", "fake-tok")
-        .env("STAVE_BASE_URL", server.uri())
-        .env("STAVE_AUDIT_DIR", &audit_dir)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let api = api_audit_lines(&audit_dir);
-    assert_eq!(api.len(), 1);
-    assert!(
-        api[0]["response"]["next_cursor"]
+        line["response"]["shape_hash"]
             .as_str()
-            .unwrap()
-            .contains("cursor=abc123"),
-        "DRF next URL must land in response.next_cursor: {:?}",
+            .is_some_and(|h| h.starts_with("sha256:")),
+        "{line}"
+    );
+    assert_eq!(
+        line["redacted_fields"][0], "authorization",
+        "the bearer header is never recorded"
+    );
+    assert!(
+        !line.to_string().contains("example-access-token"),
+        "the token must not appear in the trail: {line}"
+    );
+}
+
+#[tokio::test]
+async fn audit_records_the_endpoint_source_when_the_endpoint_came_from_config() {
+    // `STAVE_BASE_URL` is a test and dev override, so it deliberately
+    // records no source. The config layer of the chain does, and that is
+    // the mining signal the audit format promises.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    sandbox.write_config(&format!(
+        "[default]\napi_url = \"{}\"\n",
+        graphql_url(&server)
+    ));
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token"));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1, "{api:?}");
+    assert_eq!(api[0]["invocation"]["api_url_source"], "config");
+    assert_eq!(
+        api[0]["path_params_source"]["_api_url"], "config",
+        "the endpoint's provenance rides alongside the other params"
+    );
+}
+
+#[tokio::test]
+async fn audit_records_the_endpoint_source_as_flag_for_a_per_call_override() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args([
+            "list",
+            "issue",
+            "--limit",
+            "2",
+            "--api-url",
+            &graphql_url(&server),
+        ])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token"));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1, "{api:?}");
+    assert_eq!(
+        api[0]["invocation"]["api_url_source"], "flag",
+        "per-call intent is the signal that distinguishes an override"
+    );
+}
+
+#[tokio::test]
+async fn base_url_override_records_no_endpoint_source() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1, "{api:?}");
+    assert!(
+        api[0]["invocation"]["api_url_source"].is_null(),
+        "the test override is not a chain layer: {:?}",
+        api[0]
+    );
+    assert!(
+        api[0].get("path_params_source").is_none(),
+        "no chain-resolved params means no key at all: {:?}",
         api[0]
     );
 }
 
 #[tokio::test]
-async fn get_device_routes_id_path_param() {
+async fn every_page_of_one_call_shares_a_trace_id() {
     let server = MockServer::start().await;
-    let body = json!({
-        "device_id": "dev_001",
-        "device_name": "kestrel",
-        "platform": "Mac",
-        "serial_number": "C02XA0AAAA01",
-    });
-    Mock::given(method("GET"))
-        .and(path("/api/v1/devices/dev_001"))
-        .and(header("authorization", "Bearer fake-tok"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&body))
-        .expect(1)
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains(r#""first":3"#))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            Some("cursor-page-2"),
+        )))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_string_contains("cursor-page-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            vec![third_issue_node()],
+            None,
+        )))
         .mount(&server)
         .await;
 
-    let audit_dir = tempdir("audit");
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "3"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
 
-    let out = cmd()
-        .args(["get", "device", "dev_001"])
-        .env("STAVE_API_TOKEN", "fake-tok")
-        .env("STAVE_BASE_URL", server.uri())
-        .env("STAVE_AUDIT_DIR", &audit_dir)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let stdout = std::str::from_utf8(&out.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 1, "get emits one record");
-    let rec: Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(rec.get("_kind").and_then(Value::as_str), Some("device"));
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 2, "one line per page: {api:?}");
     assert_eq!(
-        rec.get("device_id").and_then(Value::as_str),
-        Some("dev_001")
+        api[0]["trace_id"], api[1]["trace_id"],
+        "a miner must see the paged read as one logical operation"
+    );
+    assert_ne!(
+        api[0]["span_id"], api[1]["span_id"],
+        "each page is still its own span"
     );
 }
 
 #[tokio::test]
-async fn write_guard_blocks_mutating_op_before_any_request() {
+async fn no_audit_records_a_stub_line_without_operation_or_response_detail() {
     let server = MockServer::start().await;
-    // expect(0): the guard must fire before the request is built.
-    Mock::given(method("PATCH"))
-        .and(path("/api/v1/devices/dev_001"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2", "--no-audit"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let lines = sandbox.audit_lines();
+    assert_eq!(
+        lines.len(),
+        1,
+        "--no-audit still leaves a record that the call happened: {lines:?}"
+    );
+    let line = &lines[0];
+    assert_eq!(line["result"], "redacted_block");
+    assert!(
+        line.get("operation").is_none(),
+        "operation detail is withheld: {line}"
+    );
+    assert_eq!(line["response"]["status"], 200);
+    assert_eq!(line["redacted_fields"][0], "operation");
+    assert_eq!(line["redacted_fields"][1], "response");
+}
+
+// ---------------------------------------------------------------------------
+// the OAuth mint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_mint_posts_a_client_credentials_grant_for_the_wiz_api_audience() {
+    let server = MockServer::start().await;
+    let token = common::jwt_with_dc_claim();
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=client_credentials"))
+        .and(body_string_contains("audience=wiz-api"))
+        .and(body_string_contains("client_id=svc-example"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": token,
+            "expires_in": 3600,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", format!("Bearer {token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2"])
+        .env("STAVE_CLIENT_ID", "svc-example")
+        .env("STAVE_CLIENT_SECRET", "example-secret")
+        .env("STAVE_TOKEN_URL", format!("{}/oauth/token", server.uri()))
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+
+    assert!(
+        out.status.success(),
+        "mint then call failed: {}",
+        stderr_of(&out)
+    );
+    assert_eq!(jsonl(&stdout_of(&out)).len(), 2);
+
+    assert!(
+        sandbox.token_cache_file().exists(),
+        "a minted token is cached so the next pipeline stage does not re-mint"
+    );
+    let cached: Value =
+        serde_json::from_str(&std::fs::read_to_string(sandbox.token_cache_file()).unwrap())
+            .expect("cache file is JSON");
+    assert_eq!(cached["client_id"], "svc-example");
+    assert!(
+        cached["expires_at"].as_str().is_some(),
+        "the cache records its own expiry: {cached}"
+    );
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1);
+    assert_eq!(
+        api[0]["invocation"]["auth_source"], "env",
+        "the secret came from STAVE_CLIENT_SECRET"
+    );
+    assert!(
+        !api[0].to_string().contains("example-secret"),
+        "the secret must never reach the trail: {:?}",
+        api[0]
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_cached_token_is_reused_instead_of_minting_again() {
+    let server = MockServer::start().await;
+    let token = common::jwt_with_dc_claim();
+
+    // expect(0): the cache is fresh, so the mint must not be called.
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "should-never-be-minted",
+            "expires_in": 3600,
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", format!("Bearer {token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let token_url = format!("{}/oauth/token", server.uri());
+    std::fs::create_dir_all(sandbox.token_cache_dir()).unwrap();
+    std::fs::write(
+        sandbox.token_cache_file(),
+        json!({
+            "access_token": token,
+            "expires_at": (chrono::Utc::now() + chrono::TimeDelta::seconds(3600)).to_rfc3339(),
+            "token_url": token_url,
+            "client_id": "svc-example",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2"])
+        .env("STAVE_CLIENT_ID", "svc-example")
+        .env("STAVE_CLIENT_SECRET", "example-secret")
+        .env("STAVE_TOKEN_URL", &token_url)
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
+
+#[tokio::test]
+async fn a_cached_token_for_a_different_client_is_not_reused() {
+    let server = MockServer::start().await;
+    let minted = common::jwt_with_dc_claim();
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("client_id=svc-second"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": minted,
+            "expires_in": 3600,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", format!("Bearer {minted}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let token_url = format!("{}/oauth/token", server.uri());
+    std::fs::create_dir_all(sandbox.token_cache_dir()).unwrap();
+    std::fs::write(
+        sandbox.token_cache_file(),
+        json!({
+            "access_token": "token-belonging-to-the-first-service-account",
+            "expires_at": (chrono::Utc::now() + chrono::TimeDelta::seconds(3600)).to_rfc3339(),
+            "token_url": token_url,
+            "client_id": "svc-first",
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2"])
+        .env("STAVE_CLIENT_ID", "svc-second")
+        .env("STAVE_CLIENT_SECRET", "example-secret")
+        .env("STAVE_TOKEN_URL", &token_url)
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
+
+#[tokio::test]
+async fn a_refused_mint_reports_the_endpoint_and_the_credential_to_check() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error": "invalid_client"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
         .expect(0)
         .mount(&server)
         .await;
 
-    let out = cmd()
-        .args([
-            "api",
-            "patch_devices_device_id",
-            "--param",
-            "device_id=dev_001",
-            "--body",
-            r#"{"asset_tag":"A-1"}"#,
-        ])
-        .env("STAVE_API_TOKEN", "fake-tok")
-        .env("STAVE_BASE_URL", server.uri())
-        .env("STAVE_AUDIT", "off")
-        .output()
-        .unwrap();
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue"])
+        .env("STAVE_CLIENT_ID", "svc-example")
+        .env("STAVE_CLIENT_SECRET", "wrong-secret")
+        .env("STAVE_TOKEN_URL", format!("{}/oauth/token", server.uri()))
+        .env("STAVE_BASE_URL", graphql_url(&server)));
 
-    assert!(!out.status.success(), "guard must reject: {out:?}");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("write-guard"), "stderr: {err}");
-    assert!(err.contains("patch_devices_device_id"), "stderr: {err}");
-    assert!(err.contains("--allow-write"), "stderr: {err}");
-    // MockServer::drop verifies expect(0) — no request went out.
-}
-
-#[tokio::test]
-async fn write_guard_opens_with_allow_write_flag() {
-    let server = MockServer::start().await;
-    Mock::given(method("PATCH"))
-        .and(path("/api/v1/devices/dev_001"))
-        .and(header("authorization", "Bearer fake-tok"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"device_id": "dev_001", "asset_tag": "A-1"})),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let audit_dir = tempdir("audit");
-
-    let out = cmd()
-        .args([
-            "api",
-            "patch_devices_device_id",
-            "--param",
-            "device_id=dev_001",
-            "--body",
-            r#"{"asset_tag":"A-1"}"#,
-            "--allow-write",
-        ])
-        .env("STAVE_API_TOKEN", "fake-tok")
-        .env("STAVE_BASE_URL", server.uri())
-        .env("STAVE_AUDIT_DIR", &audit_dir)
-        .output()
-        .unwrap();
-
+    assert!(!out.status.success(), "{out:?}");
+    let err = stderr_of(&out);
+    assert!(err.contains("token mint failed"), "{err}");
     assert!(
-        out.status.success(),
-        "allow-write PATCH failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        err.contains("client ID/secret"),
+        "the error must say what to check: {err}"
     );
-    let stdout = std::str::from_utf8(&out.stdout).unwrap();
-    assert!(stdout.contains("asset_tag"), "response echoed: {stdout}");
-
-    let api = api_audit_lines(&audit_dir);
-    assert_eq!(api.len(), 1, "mutating call must still audit: {api:?}");
-    assert_eq!(api[0]["operation"]["method"], "PATCH");
+    assert!(
+        err.contains("/oauth/token"),
+        "and which endpoint refused: {err}"
+    );
+    assert!(
+        !sandbox.token_cache_file().exists(),
+        "a failed mint must not write a cache entry"
+    );
 }
 
 #[tokio::test]
-async fn write_guard_opens_with_env_standing_optin() {
+async fn the_access_token_env_short_circuits_the_mint_entirely() {
     let server = MockServer::start().await;
-    Mock::given(method("PATCH"))
-        .and(path("/api/v1/devices/dev_002"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token": "x"})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", "Bearer example-access-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(connection_page(
+            "issuesV2",
+            issue_nodes(),
+            None,
+        )))
         .expect(1)
         .mount(&server)
         .await;
 
-    let out = cmd()
-        .args([
-            "api",
-            "patch_devices_device_id",
-            "--param",
-            "device_id=dev_002",
-            "--body",
-            r#"{"asset_tag":"A-2"}"#,
-        ])
-        .env("STAVE_API_TOKEN", "fake-tok")
-        .env("STAVE_BASE_URL", server.uri())
-        .env("STAVE_ALLOW_WRITE", "1")
-        .env("STAVE_AUDIT", "off")
-        .output()
-        .unwrap();
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["list", "issue", "--limit", "2"])
+        .env("STAVE_ACCESS_TOKEN", "example-access-token")
+        .env("STAVE_CLIENT_ID", "svc-example")
+        .env("STAVE_CLIENT_SECRET", "example-secret")
+        .env("STAVE_TOKEN_URL", format!("{}/oauth/token", server.uri()))
+        .env("STAVE_BASE_URL", graphql_url(&server)));
+    assert!(out.status.success(), "{}", stderr_of(&out));
 
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1);
     assert!(
-        out.status.success(),
-        "STAVE_ALLOW_WRITE=1 PATCH failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        api[0]["invocation"]["auth_source"].is_null(),
+        "a caller-supplied token has no chain source: {:?}",
+        api[0]
     );
 }
