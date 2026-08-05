@@ -45,7 +45,7 @@ const CONFIG_KEYS: &str =
 #[derive(Parser, Debug)]
 #[command(
     name = "stave",
-    version,
+    version = stave_sdk::FULL_VERSION,
     about = "Unofficial Rust CLI for the Wiz GraphQL API",
     long_about = "Agent-first CLI over the Wiz GraphQL API. Curated operation library as the \
                   contract, audit-trail-as-feature, read-only against the live tenant by \

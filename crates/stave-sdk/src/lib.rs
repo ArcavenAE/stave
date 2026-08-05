@@ -32,3 +32,13 @@ pub use mcp::{McpClient, McpTool};
 pub use ops::{DocumentMeta, OpType, OperationDoc, classify_document};
 
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Channel/build identity stamped by `build.rs`: the CI channel tag
+/// (`STAVE_BUILD_ID` env), a local `dev+g<sha7>[-dirty]`, or `unknown`.
+/// Lets audit miners stratify by channel when channels share one
+/// Cargo version.
+pub const BUILD_ID: &str = env!("STAVE_BUILD_ID");
+
+/// `<semver> (<build_id>)` — the CLI's `--version` string.
+pub const FULL_VERSION: &str =
+    concat!(env!("CARGO_PKG_VERSION"), " (", env!("STAVE_BUILD_ID"), ")");
