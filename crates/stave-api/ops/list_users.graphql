@@ -1,0 +1,14 @@
+# Provisional until live introspection (see charter F1).
+query ListUsers($first: Int, $after: String) {
+  users(first: $first, after: $after) {
+    nodes {
+      id
+      name
+      email
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

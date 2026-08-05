@@ -1,0 +1,13 @@
+# Provisional until live introspection (see charter F1).
+query ListReports($first: Int, $after: String) {
+  reports(first: $first, after: $after) {
+    nodes {
+      id
+      name
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

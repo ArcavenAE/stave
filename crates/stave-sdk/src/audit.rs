@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::auth::{ParamSource, TokenSource};
+use crate::auth::{ParamSource, SecretSource};
 use crate::error::Result;
 use crate::redact;
 
@@ -40,6 +40,7 @@ pub fn audit_dir() -> Option<PathBuf> {
 pub enum Outcome {
     Ok,
     HttpError,
+    GraphQlError,
     NetworkError,
     AuthError,
     RedactedBlock,
@@ -50,6 +51,7 @@ impl Outcome {
         match self {
             Outcome::Ok => "ok",
             Outcome::HttpError => "http_error",
+            Outcome::GraphQlError => "graphql_error",
             Outcome::NetworkError => "network_error",
             Outcome::AuthError => "auth_error",
             Outcome::RedactedBlock => "redacted_block",
@@ -72,11 +74,11 @@ pub struct Span {
     pub host: String,
     pub user: String,
     pub tty: bool,
-    pub auth_source: Option<TokenSource>,
-    /// Provenance of the tenant subdomain the Client resolved through
-    /// the val-resolution-chain (`flag` / `env` / `config`). `None`
-    /// for explicit-base-URL clients (tests) and MCP-only spans.
-    pub subdomain_source: Option<ParamSource>,
+    pub auth_source: Option<SecretSource>,
+    /// Provenance of the API endpoint the Client resolved through the
+    /// val-resolution-chain (`flag` / `env` / `config` / `derived`).
+    /// `None` for explicit-base-URL clients (tests) and MCP-only spans.
+    pub api_url_source: Option<ParamSource>,
     pub op: Option<AuditOp>,
 
     /// Verb-phase tag — `list`, `get`, `search`, `api`, `filter`,
@@ -140,7 +142,7 @@ impl Span {
             user: std::env::var("USER").unwrap_or_default(),
             tty: std::io::IsTerminal::is_terminal(&std::io::stdout()),
             auth_source: None,
-            subdomain_source: None,
+            api_url_source: None,
             op: None,
             verb_phase: None,
             synthesis_keys: Vec::new(),
@@ -250,7 +252,7 @@ impl Span {
                 "user": self.user,
                 "tty": self.tty,
                 "auth_source": self.auth_source.map(|s| s.as_str()),
-                "subdomain_source": self.subdomain_source.map(|s| s.as_str()),
+                "api_url_source": self.api_url_source.map(|s| s.as_str()),
             },
         });
         if let Some(p) = self.verb_phase {

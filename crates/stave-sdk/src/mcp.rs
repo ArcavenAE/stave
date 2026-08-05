@@ -1,95 +1,58 @@
-//! MCP client for iru's published MCP server.
+//! MCP client for Wiz's hosted (remote) MCP server.
 //!
-//! iru exposes its Enterprise API surface as MCP tools at
-//! `https://<subdomain>.connect.iru.com/mcp-server/connector/kandji/tools`
-//! (streamable-HTTP transport, JSON-RPC 2.0). Authentication is two
-//! headers from the token's one-time MCP configuration:
-//! `X-API-Key` (`sk_live:`-prefixed) and `X-MCP-Profile`.
+//! Wiz publishes a remote MCP server at `https://mcp.app.wiz.io`
+//! (streamable-HTTP transport, JSON-RPC 2.0), authenticated with the
+//! same OAuth bearer tokens the GraphQL API uses. stave operates the
+//! server as a *client* — `stave mcp tools`, `stave mcp call <tool>` —
+//! so the audit trail captures MCP usage alongside GraphQL usage. The
+//! same write-guard posture applies: tools whose names are not
+//! read-shaped require an explicit write opt-in.
 //!
-//! stave operates this server as a *client* — `stave mcp tools`,
-//! `stave mcp call <tool>` — so the audit trail captures MCP usage
-//! alongside REST usage. The same write-guard posture applies: tools
-//! whose names are not read-shaped require an explicit write opt-in.
-//!
-//! Verified against the live server 2026-07-15: `kandji-mcp` v3.4.4,
-//! 131 tools, responses delivered as `text/event-stream` frames each
-//! carrying one `data: <json-rpc>` line.
+//! Transport, handshake, and the tool vocabulary are **provisional
+//! until live-validated** (charter F3) — the shape below follows the
+//! MCP streamable-HTTP spec and the sibling implementation verified
+//! against another vendor's server.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth;
-use crate::error::{StaveError, Result};
+use crate::error::{Result, StaveError};
 
-/// MCP protocol version stave speaks. The live iru server
-/// negotiated this version at scaffold time.
+/// MCP protocol version stave speaks.
 pub const PROTOCOL_VERSION: &str = "2025-03-26";
 
-/// Derive the default MCP server URL from a tenant subdomain.
-pub fn default_url(subdomain: &str) -> String {
-    format!("https://{subdomain}.connect.iru.com/mcp-server/connector/kandji/tools")
-}
+/// Default Wiz remote MCP endpoint.
+pub const DEFAULT_MCP_URL: &str = "https://mcp.app.wiz.io";
+
+/// Env override for the MCP endpoint.
+pub const MCP_URL_ENV: &str = "STAVE_MCP_URL";
 
 /// True when an MCP tool name is read-shaped and therefore exempt from
-/// the write-guard. The iru MCP tool vocabulary uses `get-*` and
-/// `list-*` prefixes for reads; everything else (create/update/delete/
-/// erase/lock/…) mutates tenant state or triggers device actions.
+/// the write-guard. Conservative: unknown shapes are write-gated.
+/// Accepts common read prefixes across `-`/`_` separators and
+/// case-insensitively.
 pub fn is_read_only_tool(name: &str) -> bool {
-    name.starts_with("get-") || name.starts_with("list-")
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    ["get-", "list-", "search-", "read-", "query-", "describe-", "find-"]
+        .iter()
+        .any(|p| normalized.starts_with(p))
 }
 
-/// Resolved MCP credentials + endpoint.
-#[derive(Clone, Debug)]
-pub struct McpCredentials {
-    pub url: String,
-    pub api_key: String,
-    pub profile: String,
-    /// Where the api key came from (audit signal).
-    pub api_key_source: auth::TokenSource,
-}
-
-/// Resolve MCP credentials: api key (env → keyring → config), profile
-/// (env → config), URL (env → config → derived from the subdomain
-/// chain). Errors name every missing layer.
-pub fn resolve_credentials() -> Result<McpCredentials> {
-    let key = auth::resolve_mcp_api_key()?.ok_or_else(|| {
-        StaveError::Auth(format!(
-            "no MCP API key found. Set {env}=<sk_live:...>, run \
-             `stave mcp login --stdin` to store one in the platform \
-             keyring, or write `[mcp] api_key = \"<value>\"` to the config \
-             file. The key comes from the one-time MCP configuration shown \
-             when an MCP-enabled API token is created in iru Access.",
-            env = auth::MCP_API_KEY_ENV
-        ))
-    })?;
-    let profile = auth::resolve_mcp_profile()?.ok_or_else(|| {
-        StaveError::Auth(format!(
-            "no MCP profile found. Set {env}=<hex-profile>, or persist it \
-             via `stave mcp login --profile <hex-profile>`. The profile \
-             is the X-MCP-Profile value from the token's MCP configuration.",
-            env = auth::MCP_PROFILE_ENV
-        ))
-    })?;
-    let url = match auth::resolve_mcp_url()? {
-        Some(u) => u.value,
-        None => {
-            let subdomain = auth::resolve_subdomain(None)?.ok_or_else(|| {
-                StaveError::Auth(
-                    "no MCP URL configured and no subdomain to derive it from. \
-                     Set the subdomain (`stave auth login --subdomain <name>`) \
-                     or the URL directly (`stave config set mcp.url <url>`)."
-                        .into(),
-                )
-            })?;
-            default_url(&subdomain.value)
+/// Resolve the MCP endpoint: env → config (`[mcp] url`) → default.
+pub fn resolve_url() -> Result<String> {
+    if let Ok(v) = std::env::var(MCP_URL_ENV) {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Ok(v.to_string());
         }
-    };
-    Ok(McpCredentials {
-        url,
-        api_key: key.token,
-        profile: profile.value,
-        api_key_source: key.source,
-    })
+    }
+    if let Some(cfg) = auth::read_config()? {
+        if let Some(u) = cfg.mcp.url.filter(|u| !u.trim().is_empty()) {
+            return Ok(u.trim().to_string());
+        }
+    }
+    Ok(DEFAULT_MCP_URL.to_string())
 }
 
 /// One tool from `tools/list`.
@@ -111,30 +74,26 @@ pub struct McpServerInfo {
 
 pub struct McpClient {
     http: reqwest::Client,
-    creds: McpCredentials,
+    url: String,
+    bearer: String,
 }
 
 impl McpClient {
-    /// Build a client from resolved credentials.
-    pub fn new(creds: McpCredentials) -> Result<Self> {
+    /// Build a client from an explicit endpoint + bearer token.
+    pub fn new(url: impl Into<String>, bearer: impl Into<String>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| StaveError::Network(e.to_string()))?;
-        Ok(Self { http, creds })
-    }
-
-    /// Resolve credentials from the chains and build a client.
-    pub fn from_env() -> Result<Self> {
-        Self::new(resolve_credentials()?)
+        Ok(Self {
+            http,
+            url: url.into(),
+            bearer: bearer.into(),
+        })
     }
 
     pub fn url(&self) -> &str {
-        &self.creds.url
-    }
-
-    pub fn api_key_source(&self) -> auth::TokenSource {
-        self.creds.api_key_source
+        &self.url
     }
 
     /// JSON-RPC `initialize` handshake. Returns the server info.
@@ -160,8 +119,7 @@ impl McpClient {
         serde_json::from_value(info).map_err(StaveError::from)
     }
 
-    /// JSON-RPC `tools/list`. The iru server returns the full tool set
-    /// in one page.
+    /// JSON-RPC `tools/list`.
     pub async fn tools_list(&self) -> Result<Vec<McpTool>> {
         let result = self.rpc("tools/list", json!({}), 2).await?;
         let tools = result
@@ -182,9 +140,9 @@ impl McpClient {
         .await
     }
 
-    /// POST one JSON-RPC request and parse the response, which the iru
-    /// server delivers either as `application/json` or as an SSE frame
-    /// (`text/event-stream` with `data: <json>` lines).
+    /// POST one JSON-RPC request and parse the response, which a
+    /// streamable-HTTP server delivers either as `application/json` or
+    /// as an SSE frame (`text/event-stream` with `data: <json>` lines).
     async fn rpc(&self, method: &str, params: Value, id: u64) -> Result<Value> {
         let payload = json!({
             "jsonrpc": "2.0",
@@ -194,11 +152,10 @@ impl McpClient {
         });
         let response = self
             .http
-            .post(&self.creds.url)
+            .post(&self.url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
-            .header("X-API-Key", &self.creds.api_key)
-            .header("X-MCP-Profile", &self.creds.profile)
+            .bearer_auth(&self.bearer)
             .json(&payload)
             .send()
             .await
@@ -256,9 +213,8 @@ fn parse_rpc_body(body: &str) -> Result<Value> {
 }
 
 /// Extract the primary text payload from a `tools/call` result's
-/// `content` array. The iru server wraps its REST envelope as one
-/// `{"type": "text", "text": "<json>"}` item; when the text parses as
-/// JSON we return the parsed value, otherwise the raw string.
+/// `content` array. When the text parses as JSON we return the parsed
+/// value, otherwise the raw string.
 pub fn extract_call_payload(result: &Value) -> Value {
     let text = result
         .get("content")
@@ -281,31 +237,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_url_embeds_subdomain() {
-        assert_eq!(
-            default_url("accuhive"),
-            "https://accuhive.connect.iru.com/mcp-server/connector/kandji/tools"
-        );
-    }
-
-    #[test]
     fn read_only_heuristic_accepts_reads() {
-        assert!(is_read_only_tool("get-devices"));
-        assert!(is_read_only_tool("get-settings-licensing"));
-        assert!(is_read_only_tool("list-apple-ade-token-devices"));
+        assert!(is_read_only_tool("get-issues"));
+        assert!(is_read_only_tool("list_projects"));
+        assert!(is_read_only_tool("Search-Resources"));
+        assert!(is_read_only_tool("query-graph"));
     }
 
     #[test]
-    fn read_only_heuristic_rejects_mutations() {
+    fn read_only_heuristic_rejects_mutations_and_unknowns() {
         for tool in [
-            "erase-device",
-            "delete-blueprint",
-            "create-tag",
-            "update-device",
-            "lock-device",
-            "restart-device",
-            "blank-push",
-            "export-prism-data",
+            "resolve-issue",
+            "delete-report",
+            "create-project",
+            "update-control",
+            "run-report",
+            "rotate-service-account-secret",
+            "ambiguous-tool",
         ] {
             assert!(!is_read_only_tool(tool), "{tool} must be write-gated");
         }
@@ -333,10 +281,10 @@ mod tests {
     #[test]
     fn extract_call_payload_parses_inner_json() {
         let result = serde_json::json!({
-            "content": [{"type": "text", "text": "{\"operation\":\"get-devices\",\"result\":[1,2]}"}]
+            "content": [{"type": "text", "text": "{\"operation\":\"get-issues\",\"result\":[1,2]}"}]
         });
         let payload = extract_call_payload(&result);
-        assert_eq!(payload["operation"], "get-devices");
+        assert_eq!(payload["operation"], "get-issues");
     }
 
     #[test]

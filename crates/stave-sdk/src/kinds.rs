@@ -1,51 +1,51 @@
-//! The `_kind` types for stave v0.1 — iru Endpoint Management nouns.
+//! The `_kind` types for stave v0.1 — Wiz security-graph nouns.
 //!
 //! Each kind binds:
-//!   * a stable name (`device`, `blueprint`, …) — appears in `_kind`
-//!   * a list operation (`operationId`) for `stave list <kind>`
-//!   * an optional get-by-id operation for `stave get <kind> <id>`
+//!   * a stable name (`issue`, `project`, …) — appears in `_kind`
+//!   * a curated list operation (`stave list <kind>`)
 //!   * the field that holds the primary key
-//!   * the response-extraction strategy — iru endpoints return either
-//!     bare arrays (`GET /devices`) or DRF-style
-//!     `{count, next, previous, results}` wrappers
+//!   * severity / timestamp / search field metadata for the primitives
 //!
-//! Field metadata (id/severity/timestamp/search fields) is drawn from
-//! the iru API documentation and is **provisional until live-validated**
-//! — the scaffold-time token had no API permissions (bd aae-orc-b6dg.11),
-//! so per-kind field names could not be confirmed against real payloads.
-//! Wrong guesses degrade gracefully: `emit --format md` shows blanks and
-//! `--since` errors name the missing field.
+//! Field metadata is drawn from Wiz's published API examples and is
+//! **provisional until live-validated** (charter F1) — per-kind field
+//! names could not be confirmed against real payloads at scaffold
+//! time. Wrong guesses degrade gracefully: `emit --format md` shows
+//! blanks and `--since` errors name the missing field.
+//!
+//! There is no `stave get <kind> <id>` in v0.1: singular lookups need
+//! per-kind filter input types we will not guess at. Use `stave api`
+//! with a custom document until introspection lands (charter F2).
 
 use serde_json::Value;
 
 /// Stable v0.1 kind names.
-pub const KIND_DEVICE: &str = "device";
-pub const KIND_BLUEPRINT: &str = "blueprint";
+pub const KIND_ISSUE: &str = "issue";
+pub const KIND_VULNERABILITY_FINDING: &str = "vulnerability_finding";
+pub const KIND_CLOUD_RESOURCE: &str = "cloud_resource";
+pub const KIND_PROJECT: &str = "project";
+pub const KIND_REPORT: &str = "report";
+pub const KIND_CONTROL: &str = "control";
+pub const KIND_SECURITY_FRAMEWORK: &str = "security_framework";
+pub const KIND_CLOUD_ACCOUNT: &str = "cloud_account";
 pub const KIND_USER: &str = "user";
-pub const KIND_TAG: &str = "tag";
-pub const KIND_AUDIT_EVENT: &str = "audit_event";
-pub const KIND_THREAT: &str = "threat";
-pub const KIND_BEHAVIORAL_DETECTION: &str = "behavioral_detection";
-pub const KIND_VULNERABILITY: &str = "vulnerability";
-pub const KIND_CUSTOM_APP: &str = "custom_app";
-pub const KIND_CUSTOM_PROFILE: &str = "custom_profile";
-pub const KIND_CUSTOM_SCRIPT: &str = "custom_script";
-pub const KIND_ADE_DEVICE: &str = "ade_device";
+pub const KIND_SERVICE_ACCOUNT: &str = "service_account";
+pub const KIND_AUDIT_LOG: &str = "audit_log";
+pub const KIND_CLOUD_CONFIG_RULE: &str = "cloud_config_rule";
 
 /// All v0.1 kind names, in stable order.
 pub const ALL_KINDS: &[&str] = &[
-    KIND_DEVICE,
-    KIND_BLUEPRINT,
+    KIND_ISSUE,
+    KIND_VULNERABILITY_FINDING,
+    KIND_CLOUD_RESOURCE,
+    KIND_PROJECT,
+    KIND_REPORT,
+    KIND_CONTROL,
+    KIND_SECURITY_FRAMEWORK,
+    KIND_CLOUD_ACCOUNT,
     KIND_USER,
-    KIND_TAG,
-    KIND_AUDIT_EVENT,
-    KIND_THREAT,
-    KIND_BEHAVIORAL_DETECTION,
-    KIND_VULNERABILITY,
-    KIND_CUSTOM_APP,
-    KIND_CUSTOM_PROFILE,
-    KIND_CUSTOM_SCRIPT,
-    KIND_ADE_DEVICE,
+    KIND_SERVICE_ACCOUNT,
+    KIND_AUDIT_LOG,
+    KIND_CLOUD_CONFIG_RULE,
 ];
 
 /// Static metadata for one `_kind`.
@@ -54,12 +54,8 @@ pub struct KindSpec {
     /// Stable name in the stream contract.
     pub name: &'static str,
 
-    /// `operationId` to call for `stave list <kind>`.
-    pub list_operation_id: Option<&'static str>,
-
-    /// `operationId` for `stave get <kind> <id>`, when the spec
-    /// exposes one.
-    pub get_operation_id: Option<&'static str>,
+    /// Curated operation name for `stave list <kind>`.
+    pub list_operation: &'static str,
 
     /// Field name in each item that carries the stable primary key.
     pub id_field: &'static str,
@@ -71,11 +67,6 @@ pub struct KindSpec {
     /// (used by `--since` and the canonical adapter's `now` binding
     /// comparisons).
     pub primary_timestamp_field: Option<&'static str>,
-
-    /// Spec path-parameter name that the kind's `id` binds to in
-    /// `stave get <kind> <id>`. `None` when the kind has no
-    /// get-by-id endpoint.
-    pub id_path_param: Option<&'static str>,
 
     /// Field name on each record that `stave search <kind> <text>`
     /// matches against (case-insensitive substring). `None` means
@@ -94,145 +85,124 @@ pub fn all_kinds() -> &'static [KindSpec] {
     KIND_TABLE
 }
 
-/// The static kind → operation table. Operation IDs are the
-/// synthesized ids from the vendored spec (`{method}_{path}` with the
-/// `/api/v1` prefix stripped — see xtask's `synthesize_operation_id`).
+/// The static kind → operation table. Operation names are curated
+/// registry names from `stave-api`.
 const KIND_TABLE: &[KindSpec] = &[
     KindSpec {
-        name: KIND_DEVICE,
-        list_operation_id: Some("get_devices"),
-        get_operation_id: Some("get_devices_device_id"),
-        id_field: "device_id",
-        severity_field: None,
-        primary_timestamp_field: Some("last_check_in"),
-        id_path_param: Some("device_id"),
-        search_field: Some("device_name"),
+        name: KIND_ISSUE,
+        list_operation: "list_issues",
+        id_field: "id",
+        severity_field: Some("severity"),
+        primary_timestamp_field: Some("createdAt"),
+        search_field: Some("type"),
     },
     KindSpec {
-        name: KIND_BLUEPRINT,
-        list_operation_id: Some("get_blueprints"),
-        get_operation_id: Some("get_blueprints_blueprint_id"),
+        name: KIND_VULNERABILITY_FINDING,
+        list_operation: "list_vulnerability_findings",
+        id_field: "id",
+        severity_field: Some("vendorSeverity"),
+        primary_timestamp_field: Some("firstDetectedAt"),
+        search_field: Some("name"),
+    },
+    KindSpec {
+        name: KIND_CLOUD_RESOURCE,
+        list_operation: "list_cloud_resources",
         id_field: "id",
         severity_field: None,
         primary_timestamp_field: None,
-        id_path_param: Some("blueprint_id"),
+        search_field: Some("name"),
+    },
+    KindSpec {
+        name: KIND_PROJECT,
+        list_operation: "list_projects",
+        id_field: "id",
+        severity_field: None,
+        primary_timestamp_field: None,
+        search_field: Some("name"),
+    },
+    KindSpec {
+        name: KIND_REPORT,
+        list_operation: "list_reports",
+        id_field: "id",
+        severity_field: None,
+        primary_timestamp_field: None,
+        search_field: Some("name"),
+    },
+    KindSpec {
+        name: KIND_CONTROL,
+        list_operation: "list_controls",
+        id_field: "id",
+        severity_field: Some("severity"),
+        primary_timestamp_field: None,
+        search_field: Some("name"),
+    },
+    KindSpec {
+        name: KIND_SECURITY_FRAMEWORK,
+        list_operation: "list_security_frameworks",
+        id_field: "id",
+        severity_field: None,
+        primary_timestamp_field: None,
+        search_field: Some("name"),
+    },
+    KindSpec {
+        name: KIND_CLOUD_ACCOUNT,
+        list_operation: "list_cloud_accounts",
+        id_field: "id",
+        severity_field: None,
+        primary_timestamp_field: None,
         search_field: Some("name"),
     },
     KindSpec {
         name: KIND_USER,
-        list_operation_id: Some("get_users"),
-        get_operation_id: Some("get_users_user_id"),
+        list_operation: "list_users",
         id_field: "id",
         severity_field: None,
         primary_timestamp_field: None,
-        id_path_param: Some("user_id"),
         search_field: Some("email"),
     },
     KindSpec {
-        name: KIND_TAG,
-        list_operation_id: Some("get_tags"),
-        get_operation_id: None,
+        name: KIND_SERVICE_ACCOUNT,
+        list_operation: "list_service_accounts",
         id_field: "id",
         severity_field: None,
-        primary_timestamp_field: None,
-        id_path_param: None,
+        primary_timestamp_field: Some("createdAt"),
         search_field: Some("name"),
     },
     KindSpec {
-        name: KIND_AUDIT_EVENT,
-        list_operation_id: Some("get_audit_events"),
-        get_operation_id: None,
+        name: KIND_AUDIT_LOG,
+        list_operation: "list_audit_log_entries",
         id_field: "id",
         severity_field: None,
-        primary_timestamp_field: Some("occurred_at"),
-        id_path_param: None,
+        primary_timestamp_field: Some("timestamp"),
         search_field: Some("action"),
     },
     KindSpec {
-        name: KIND_THREAT,
-        list_operation_id: Some("get_threat_details"),
-        get_operation_id: None,
-        id_field: "threat_id",
-        severity_field: None,
-        primary_timestamp_field: Some("detection_date"),
-        id_path_param: None,
-        search_field: Some("threat_name"),
-    },
-    KindSpec {
-        name: KIND_BEHAVIORAL_DETECTION,
-        list_operation_id: Some("get_behavioral_detections"),
-        get_operation_id: None,
-        id_field: "detection_id",
-        severity_field: None,
-        primary_timestamp_field: Some("detection_date"),
-        id_path_param: None,
-        search_field: Some("malware_family"),
-    },
-    KindSpec {
-        name: KIND_VULNERABILITY,
-        list_operation_id: Some("get_vulnerability_management_vulnerabilities"),
-        get_operation_id: Some("get_vulnerability_management_vulnerabilities_cve_id"),
-        id_field: "cve_id",
+        name: KIND_CLOUD_CONFIG_RULE,
+        list_operation: "list_cloud_configuration_rules",
+        id_field: "id",
         severity_field: Some("severity"),
-        primary_timestamp_field: Some("first_detection_date"),
-        id_path_param: Some("cve_id"),
-        search_field: Some("cve_id"),
-    },
-    KindSpec {
-        name: KIND_CUSTOM_APP,
-        list_operation_id: Some("get_library_custom_apps"),
-        get_operation_id: Some("get_library_custom_apps_library_item_id"),
-        id_field: "id",
-        severity_field: None,
         primary_timestamp_field: None,
-        id_path_param: Some("library_item_id"),
         search_field: Some("name"),
-    },
-    KindSpec {
-        name: KIND_CUSTOM_PROFILE,
-        list_operation_id: Some("get_library_custom_profiles"),
-        get_operation_id: Some("get_library_custom_profiles_library_item_id"),
-        id_field: "id",
-        severity_field: None,
-        primary_timestamp_field: None,
-        id_path_param: Some("library_item_id"),
-        search_field: Some("name"),
-    },
-    KindSpec {
-        name: KIND_CUSTOM_SCRIPT,
-        list_operation_id: Some("get_library_custom_scripts"),
-        get_operation_id: Some("get_library_custom_scripts_library_item_id"),
-        id_field: "id",
-        severity_field: None,
-        primary_timestamp_field: None,
-        id_path_param: Some("library_item_id"),
-        search_field: Some("name"),
-    },
-    KindSpec {
-        name: KIND_ADE_DEVICE,
-        list_operation_id: Some("get_integrations_apple_ade_devices"),
-        get_operation_id: Some("get_integrations_apple_ade_devices_device_id"),
-        id_field: "id",
-        severity_field: None,
-        primary_timestamp_field: None,
-        id_path_param: Some("device_id"),
-        search_field: Some("serial_number"),
     },
 ];
 
-/// Extract the array of items from an API response body. Mirrors the
-/// detection logic in `client::count_items` so the audit-emitted
+/// Extract the array of items from a GraphQL `data` value. With a
+/// known root field, read `data.<root>.nodes`; otherwise scan `data`'s
+/// top-level objects for the first `nodes` array. Mirrors the
+/// detection logic in the client's `count_items` so the audit-emitted
 /// `items_returned` matches what the primitive actually streams.
-pub fn extract_items(response: &Value) -> Option<&[Value]> {
-    if let Some(arr) = response.as_array() {
-        return Some(arr);
-    }
-    for key in ["results", "items", "data", "devices", "detections"] {
-        if let Some(arr) = response.get(key).and_then(|v| v.as_array()) {
-            return Some(arr);
-        }
-    }
-    None
+pub fn extract_items<'a>(data: &'a Value, root_field: Option<&str>) -> Option<&'a [Value]> {
+    let connection = match root_field {
+        Some(field) => data.get(field)?,
+        None => data
+            .as_object()?
+            .values()
+            .find(|v| v.get("nodes").is_some_and(Value::is_array))?,
+    };
+    connection
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map(|a| a.as_slice())
 }
 
 #[cfg(test)]
@@ -252,37 +222,26 @@ mod tests {
 
     #[test]
     fn lookup_known_kind() {
-        let k = kind_spec("device").expect("device in table");
-        assert_eq!(k.list_operation_id, Some("get_devices"));
-        assert_eq!(k.id_field, "device_id");
-        assert_eq!(k.search_field, Some("device_name"));
-    }
-
-    #[test]
-    fn device_kind_has_device_id_path_param() {
-        let k = kind_spec("device").expect("device in table");
-        assert_eq!(k.id_path_param, Some("device_id"));
-    }
-
-    #[test]
-    fn vulnerability_kind_carries_severity() {
-        let k = kind_spec("vulnerability").expect("vulnerability");
+        let k = kind_spec("issue").expect("issue in table");
+        assert_eq!(k.list_operation, "list_issues");
+        assert_eq!(k.id_field, "id");
         assert_eq!(k.severity_field, Some("severity"));
-        assert_eq!(k.id_path_param, Some("cve_id"));
+    }
+
+    #[test]
+    fn vulnerability_finding_carries_vendor_severity() {
+        let k = kind_spec("vulnerability_finding").expect("in table");
+        assert_eq!(k.severity_field, Some("vendorSeverity"));
+        assert_eq!(k.primary_timestamp_field, Some("firstDetectedAt"));
     }
 
     #[test]
     fn every_list_operation_exists_in_registry() {
-        // The kind table references synthesized operationIds; keep it
-        // honest against the vendored spec.
-        let r = crate::spec::registry();
+        // The kind table references curated operation names; keep it
+        // honest against the embedded operation library.
         for k in KIND_TABLE {
-            if let Some(op) = k.list_operation_id {
-                assert!(r.find(op).is_ok(), "kind {} list op {op} missing", k.name);
-            }
-            if let Some(op) = k.get_operation_id {
-                assert!(r.find(op).is_ok(), "kind {} get op {op} missing", k.name);
-            }
+            let op = crate::ops::find(k.list_operation);
+            assert!(op.is_ok(), "kind {} list op {} missing", k.name, k.list_operation);
         }
     }
 
@@ -292,21 +251,21 @@ mod tests {
     }
 
     #[test]
-    fn extract_items_handles_bare_array() {
-        let body = json!([{"device_id": "a"}, {"device_id": "b"}]);
-        assert_eq!(extract_items(&body).unwrap().len(), 2);
+    fn extract_items_reads_connection_with_root_field() {
+        let data = json!({"issuesV2": {"nodes": [{"id": "a"}, {"id": "b"}],
+            "pageInfo": {"hasNextPage": false}}});
+        assert_eq!(extract_items(&data, Some("issuesV2")).unwrap().len(), 2);
     }
 
     #[test]
-    fn extract_items_handles_drf_wrapper() {
-        let body = json!({"count": 1, "next": null, "previous": null,
-            "results": [{"id": "a"}]});
-        assert_eq!(extract_items(&body).unwrap().len(), 1);
+    fn extract_items_scans_without_root_field() {
+        let data = json!({"projects": {"nodes": [{"id": "p"}]}});
+        assert_eq!(extract_items(&data, None).unwrap().len(), 1);
     }
 
     #[test]
-    fn extract_items_returns_none_when_no_array() {
-        let body = json!({"device_id": "single", "platform": "Mac"});
-        assert!(extract_items(&body).is_none());
+    fn extract_items_returns_none_when_no_connection() {
+        let data = json!({"viewer": {"id": "x"}});
+        assert!(extract_items(&data, None).is_none());
     }
 }

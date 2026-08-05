@@ -1,0 +1,15 @@
+# Provisional until live introspection (see charter F1).
+query ListAuditLogEntries($first: Int, $after: String) {
+  auditLogEntries(first: $first, after: $after) {
+    nodes {
+      id
+      action
+      status
+      timestamp
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

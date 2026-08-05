@@ -1,0 +1,15 @@
+# Provisional until live introspection (see charter F1).
+query ListSecurityFrameworks($first: Int, $after: String) {
+  securityFrameworks(first: $first, after: $after) {
+    nodes {
+      id
+      name
+      description
+      enabled
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

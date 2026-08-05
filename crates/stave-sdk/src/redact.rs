@@ -15,6 +15,7 @@ const SENSITIVE_FLAG_NAMES: &[&str] = &[
     "--apitoken",
     "--password",
     "--secret",
+    "--client-secret",
 ];
 
 const SENSITIVE_HEADER_NAMES: &[&str] = &["authorization", "x-api-key", "x-auth-token", "cookie"];

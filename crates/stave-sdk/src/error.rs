@@ -6,7 +6,7 @@ pub enum StaveError {
     #[error("authentication: {0}")]
     Auth(String),
 
-    #[error("operation '{0}' not found in spec")]
+    #[error("operation '{0}' not found in the curated registry (see `stave ops list`)")]
     UnknownOperation(String),
 
     #[error("missing required parameter '{0}' for operation '{1}'")]
@@ -16,15 +16,21 @@ pub enum StaveError {
     InvalidParam(String, String),
 
     #[error(
-        "write-guard: operation '{operation}' is {method} (mutating) and stave is \
+        "write-guard: operation '{operation}' is a {op_type} and stave is \
          read-only by default against the live tenant. To proceed deliberately, pass \
          --allow-write, set STAVE_ALLOW_WRITE=1, or persist \
          `stave config set allow_writes true`."
     )]
-    WriteGuard { operation: String, method: String },
+    WriteGuard { operation: String, op_type: String },
 
     #[error("HTTP {status}: {body}")]
     Http { status: u16, body: String },
+
+    #[error("GraphQL: {}", messages.join("; "))]
+    GraphQl { messages: Vec<String> },
+
+    #[error("GraphQL document: {0}")]
+    Document(String),
 
     #[error("network: {0}")]
     Network(String),

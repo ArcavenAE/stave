@@ -1,12 +1,13 @@
 //! stave-sdk — the SDK that backs stave-cli and (future) stave-mcp.
 //!
 //! Modules:
-//!   * `auth`    — token resolution: env → keyring → config file (env-only in v0.1)
+//!   * `auth`    — credential + endpoint resolution chains, config file
+//!   * `token`   — OAuth2 client-credentials mint + local cache
 //!   * `audit`   — JSONL audit trail (see `docs/audit-trail-format.md`)
-//!   * `client`  — `Client::call_op(operation_id, params)` execution surface
+//!   * `client`  — GraphQL execution (`call_op` / `call_document`)
+//!   * `ops`     — curated-operation registry + ad-hoc document classifier
 //!   * `error`   — `StaveError` + `Result<T>`
 //!   * `redact`  — argv + header redaction policy
-//!   * `spec`    — operation registry over the vendored OpenAPI spec
 
 #![forbid(unsafe_code)]
 
@@ -18,16 +19,16 @@ pub mod enrich;
 pub mod error;
 pub mod kinds;
 pub mod mcp;
+pub mod ops;
 pub mod redact;
-pub mod spec;
 pub mod stream;
+pub mod token;
 
-pub use auth::{ParamSource, ResolvedParam, ResolvedToken, TokenSource};
-pub use client::{BASE_URL_ENV, CallOptions, Client};
-pub use error::{StaveError, Result};
+pub use auth::{ParamSource, ResolvedParam, ResolvedSecret, SecretSource};
+pub use client::{ACCESS_TOKEN_ENV, BASE_URL_ENV, CallOptions, Client};
+pub use error::{Result, StaveError};
 pub use kinds::{KindSpec, all_kinds, extract_items, kind_spec};
-pub use mcp::{McpClient, McpCredentials, McpTool};
-pub use spec::{HttpMethod, OperationMeta, Registry, registry};
-pub use stream::{Record, SourceRef, read_stream, write_record};
+pub use mcp::{McpClient, McpTool};
+pub use ops::{DocumentMeta, OpType, OperationDoc, classify_document};
 
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");

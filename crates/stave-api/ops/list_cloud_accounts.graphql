@@ -1,0 +1,16 @@
+# Provisional until live introspection (see charter F1).
+query ListCloudAccounts($first: Int, $after: String) {
+  cloudAccounts(first: $first, after: $after) {
+    nodes {
+      id
+      name
+      externalId
+      cloudProvider
+      status
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

@@ -1,0 +1,15 @@
+# Provisional until live introspection (see charter F1).
+query ListControls($first: Int, $after: String) {
+  controls(first: $first, after: $after) {
+    nodes {
+      id
+      name
+      severity
+      enabled
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

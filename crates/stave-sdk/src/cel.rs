@@ -127,11 +127,15 @@ pub fn evaluate(
 }
 
 /// True when the field name should be promoted to a timestamp by the
-/// canonical adapter. iru payloads carry `*_at` (audit events),
-/// `*_date` (threats, vulnerabilities), and `last_check_in` (devices);
-/// `ts` is kept for generic streams.
+/// canonical adapter. Wiz payloads carry camelCase `*At` fields
+/// (`createdAt`, `firstDetectedAt`, …) plus `timestamp` (audit log);
+/// snake_case `*_at`/`*_date` and `ts` are kept for generic streams.
 fn is_timestamp_field(name: &str) -> bool {
-    name == "ts" || name == "last_check_in" || name.ends_with("_at") || name.ends_with("_date")
+    name == "ts"
+        || name == "timestamp"
+        || name.ends_with("At")
+        || name.ends_with("_at")
+        || name.ends_with("_date")
 }
 
 fn parse_timestamp(v: &JsonValue) -> Option<DateTime<FixedOffset>> {

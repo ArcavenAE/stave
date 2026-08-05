@@ -1,0 +1,16 @@
+# Provisional until live introspection (see charter F1).
+query ListProjects($first: Int, $after: String) {
+  projects(first: $first, after: $after) {
+    nodes {
+      id
+      name
+      slug
+      description
+      archived
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

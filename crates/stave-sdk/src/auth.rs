@@ -323,6 +323,24 @@ pub struct Config {
     pub default: DefaultConfig,
     #[serde(skip_serializing_if = "RegistryConfig::is_empty")]
     pub registry: RegistryConfig,
+    #[serde(skip_serializing_if = "McpConfig::is_empty")]
+    pub mcp: McpConfig,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct McpConfig {
+    /// MCP endpoint override. When unset, the hosted default applies
+    /// (`https://mcp.app.wiz.io`). Auth rides the same OAuth bearer
+    /// token as the GraphQL API — no separate MCP credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl McpConfig {
+    fn is_empty(&self) -> bool {
+        self.url.is_none()
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

@@ -1,0 +1,27 @@
+# Provisional until live introspection (see charter F1). Conservative
+# field selection drawn from Wiz's published API examples.
+query ListIssues($first: Int, $after: String) {
+  issuesV2(first: $first, after: $after) {
+    nodes {
+      id
+      type
+      severity
+      status
+      createdAt
+      updatedAt
+      resolvedAt
+      dueAt
+      entitySnapshot {
+        id
+        type
+        name
+        cloudPlatform
+        subscriptionExternalId
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
