@@ -1,0 +1,20 @@
+id: question-response-shape-gap
+type: question
+confidence: frontier
+title: "Field metadata for threat + behavioral_detection unverified"
+content: |
+  The iru spec declares almost no response schemas, so kind-table
+  field metadata came from vendor docs. Live validation confirmed
+  10/12 kinds; `threat` and `behavioral_detection` endpoints 403 —
+  the threat/EDR permission wasn't in the token grant (or the tenant
+  SKU lacks it). Re-verify their id/timestamp/search field guesses
+  when that permission lands; an audit-trail pass over shape_hash
+  clusters is the cheap ongoing drift detector.
+edges:
+  - target: elem-live-validated
+    type: derives
+    note: "the residual gap live validation could not close"
+provenance:
+  created_by: human
+  created_at: 2026-07-15
+  session: scaffold

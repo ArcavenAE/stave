@@ -1,0 +1,15 @@
+[package]
+name = "stave-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MCP server backed by stave-sdk. Placeholder — wired in a follow-on ticket."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+stave-sdk = { path = "../stave-sdk", version = "0.0.1" }

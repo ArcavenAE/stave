@@ -1,0 +1,318 @@
+# Alpha Release
+# Triggers: push to main. Single-channel kos pattern — there is no
+# separate stave-a binary or formula. The same Formula/stave.rb
+# is updated by this workflow with an alpha-... version until the first
+# v* tag is cut, at which point release.yml takes over the same formula
+# with a stable version. macOS arm64 only.
+name: Alpha Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '_kos/**'
+      - 'spec/**.sha256'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+      - 'Formula/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build (aarch64-apple-darwin)
+    runs-on: macos-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-08-04
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+
+      - name: Extract version + tag
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          TAG="alpha-$(date -u +%Y%m%d-%H%M%S)-$(echo ${{ github.sha }} | head -c 7)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build alpha binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin --bin stave
+          cp target/aarch64-apple-darwin/release/stave stave-darwin-arm64
+
+      - name: Verify binary
+        run: ./stave-darwin-arm64 --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: alpha-binaries-darwin-arm64
+          path: stave-darwin-arm64
+
+  sign-and-notarize:
+    name: Sign & Notarize
+    needs: build
+    if: vars.SIGNING_ENABLED == 'true'
+    permissions:
+      contents: write
+    environment: release
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Download alpha binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: alpha-binaries-darwin-arm64
+
+      - name: Import certificates
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > cert.p12
+          security import cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm cert.p12
+
+          curl -sfo /tmp/DeveloperIDG2CA.cer https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security add-certificates -k build.keychain /tmp/DeveloperIDG2CA.cer
+          rm /tmp/DeveloperIDG2CA.cer
+
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+
+      - name: Sign binary
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --options runtime \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --timestamp \
+            stave-darwin-arm64
+
+      - name: Verify signature
+        run: codesign --verify --deep --strict stave-darwin-arm64
+
+      - name: Notarize binary (via zip submission)
+        env:
+          APPLE_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
+          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
+          APPLE_NOTARIZATION_TEAM_ID: ${{ secrets.APPLE_NOTARIZATION_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent stave-darwin-arm64 stave-darwin-arm64.zip
+          xcrun notarytool submit stave-darwin-arm64.zip \
+            --apple-id "$APPLE_NOTARIZATION_APPLE_ID" \
+            --password "$APPLE_NOTARIZATION_PASSWORD" \
+            --team-id "$APPLE_NOTARIZATION_TEAM_ID" \
+            --wait --timeout 14400
+          rm -f stave-darwin-arm64.zip
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-alpha-binaries-darwin-arm64
+          path: stave-darwin-arm64
+          retention-days: 14
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain build.keychain || true
+
+  create-prerelease:
+    name: Create Prerelease
+    needs: [build, sign-and-notarize]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.sign-and-notarize.result == 'success' || needs.sign-and-notarize.result == 'skipped')
+    permissions:
+      contents: write
+    environment: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Download artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.sign-and-notarize.result == 'success' && 'signed-alpha-binaries-darwin-arm64' || 'alpha-binaries-darwin-arm64' }}
+          path: dist/
+
+      - name: List release files
+        run: ls -la dist/
+
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --prerelease \
+            --title "$TAG" \
+            --notes "$(cat <<NOTES
+          Automated alpha release.
+
+          **Cargo version:** ${{ needs.build.outputs.version }}
+          **Commit:** ${{ github.sha }}
+          **Signed:** ${{ needs.sign-and-notarize.result == 'success' && 'Yes (Apple Developer ID, notarized)' || 'No (unsigned)' }}
+
+          Install via Homebrew:
+              brew install ArcavenAE/tap/stave
+
+          Or with mise (pulls this exact release, verifies GitHub attestations natively):
+              mise use "github:ArcavenAE/stave@${TAG}"
+
+          To track the alpha channel with mise, add to mise.toml:
+              [tools]
+              "github:ArcavenAE/stave" = { version = "latest", prerelease = true }
+          NOTES
+          )" \
+            dist/*
+
+      - name: Clean old prereleases (keep 30)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "${{ github.repository }}" \
+            --json tagName,isPrerelease \
+            --jq '[.[] | select(.isPrerelease)] | sort_by(.tagName) | reverse | .[30:] | .[].tagName' \
+          | while read -r tag; do
+              echo "Deleting old prerelease: $tag"
+              gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag
+            done
+
+  update-homebrew:
+    name: Update Homebrew Tap
+    needs: [build, sign-and-notarize, create-prerelease]
+    if: needs.create-prerelease.result == 'success' && needs.sign-and-notarize.result == 'success'
+    permissions:
+      contents: write
+    environment: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Download signed binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-alpha-binaries-darwin-arm64
+          path: dist/
+
+      - name: Update Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          TAG="${{ needs.build.outputs.tag }}"
+          SHA256_DARWIN_ARM64=$(shasum -a 256 dist/stave-darwin-arm64 | cut -d' ' -f1)
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/ArcavenAE/homebrew-tap.git" homebrew-tap-repo
+          cd homebrew-tap-repo
+
+          mkdir -p Formula
+          cp ../Formula/stave.rb Formula/stave.rb
+
+          sed -i "s|VERSION_PLACEHOLDER|$TAG|g" Formula/stave.rb
+          sed -i "s|TAG_PLACEHOLDER|$TAG|g" Formula/stave.rb
+          sed -i "s|SHA256_DARWIN_ARM64_PLACEHOLDER|$SHA256_DARWIN_ARM64|g" Formula/stave.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/stave.rb
+          git diff --cached --quiet || git commit -m "Update stave to $TAG"
+          git push
+
+  attest:
+    name: Attest Alpha Provenance
+    needs: [build, sign-and-notarize, create-prerelease]
+    # Run after create-prerelease (the last asset mutation) so attestations
+    # cover the bytes that ship — the signed + notarized binary uploaded to
+    # the GitHub prerelease — not the pre-sign artifact.
+    if: |
+      !cancelled() &&
+      needs.build.result == 'success' &&
+      needs.create-prerelease.result == 'success' &&
+      (needs.sign-and-notarize.result == 'success' || needs.sign-and-notarize.result == 'skipped')
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Download final release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release-assets
+          # Pull everything currently attached to the prerelease.
+          gh release download "${{ needs.build.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --dir release-assets
+          echo "Assets to be attested:"
+          ls -la release-assets/
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: 'release-assets/*'

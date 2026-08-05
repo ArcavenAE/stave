@@ -1,0 +1,39 @@
+[package]
+name = "stave-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SDK over stave-api: auth, retry, pagination, audit trail, redaction. Backs both CLI and (future) MCP."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+stave-api = { path = "../stave-api", version = "0.0.1" }
+
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+keyring.workspace = true
+dirs.workspace = true
+figment.workspace = true
+toml.workspace = true
+openapiv3.workspace = true
+sha2.workspace = true
+urlencoding.workspace = true
+cel-interpreter.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+insta.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

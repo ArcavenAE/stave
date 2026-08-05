@@ -1,0 +1,2 @@
+{"_kind":"audit_event","_source":{"operation_id":"get_audit_events","response_index":0,"fetched_at":"2026-07-15T10:00:00Z"},"id":"evt_001","action":"device.erase.requested","actor":"admin@example.com","occurred_at":"2026-07-14T18:30:00Z"}
+{"_kind":"audit_event","_source":{"operation_id":"get_audit_events","response_index":1,"fetched_at":"2026-07-15T10:00:00Z"},"id":"evt_002","action":"library.item.updated","actor":"admin@example.com","occurred_at":"2026-07-15T07:45:00Z"}

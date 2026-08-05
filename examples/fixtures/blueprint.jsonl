@@ -1,0 +1,2 @@
+{"_kind":"blueprint","_source":{"operation_id":"get_blueprints","response_index":0,"fetched_at":"2026-07-15T10:00:00Z"},"id":"bp_001","name":"Mac Fleet","icon":"laptop","computers_count":42,"enrollment_code":{"is_active":true,"code":"ENROLL01"}}
+{"_kind":"blueprint","_source":{"operation_id":"get_blueprints","response_index":1,"fetched_at":"2026-07-15T10:00:00Z"},"id":"bp_002","name":"Kiosk iPads","icon":"tablet","computers_count":7,"enrollment_code":{"is_active":false,"code":"ENROLL02"}}

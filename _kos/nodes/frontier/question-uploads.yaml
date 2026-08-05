@@ -1,0 +1,19 @@
+id: question-uploads
+type: question
+confidence: frontier
+title: "Library uploads (multipart) — curated verb or out of scope?"
+content: |
+  The three multipart upload endpoints (custom apps, in-house apps)
+  are stripped from the generated client and not invocable via
+  `stave api` (JSON body only). If uploads matter, they arrive as
+  a curated verb wrapping the documented S3 upload flow
+  (upload-to-s3-openapi.json is a separate vendor spec). No demand
+  signal yet.
+edges:
+  - target: elem-codegen-iru-prepasses
+    type: derives
+    note: "the multipart pre-pass created this gap deliberately"
+provenance:
+  created_by: human
+  created_at: 2026-07-15
+  session: scaffold

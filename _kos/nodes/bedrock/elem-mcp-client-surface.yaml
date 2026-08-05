@@ -1,0 +1,23 @@
+id: elem-mcp-client-surface
+type: element
+confidence: bedrock
+title: "MCP client surface — operate iru's published server (B6)"
+content: |
+  iru publishes an MCP server per tenant
+  (https://<subdomain>.connect.iru.com/mcp-server/connector/kandji/tools,
+  streamable HTTP, X-API-Key `sk_live:` + X-MCP-Profile headers).
+  `stave mcp` operates it: login (key → keyring, profile/url →
+  config), status, config [--reveal], tools (JSONL, _kind: mcp_tool),
+  call (write-gated), map (tool-name ↔ operationId crosswalk;
+  unmatched tools emit operation_id: null — the gap itself is data).
+  MCP calls emit audit lines with verb_phase "mcp", mcp_tool, args
+  shape hash, outcome.
+
+  Live-verified 2026-07-15: kandji-mcp v3.4.4, 131 tools, SSE-framed
+  JSON-RPC; read call outcome=success; write-guard refused create-tag;
+  map linked 35/131.
+edges: []
+provenance:
+  created_by: human
+  created_at: 2026-07-15
+  session: scaffold

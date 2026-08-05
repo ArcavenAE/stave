@@ -1,0 +1,34 @@
+[package]
+name = "stave-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust CLI for the iru (Kandji) Endpoint Management API. Agent-first ergonomics, audit-trail-as-feature."
+
+[[bin]]
+name = "stave"
+path = "src/main.rs"
+
+[dependencies]
+stave-sdk = { path = "../stave-sdk", version = "0.0.1" }
+
+clap.workspace = true
+clap_complete.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+cel-interpreter.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+wiremock.workspace = true

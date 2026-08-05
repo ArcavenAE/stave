@@ -1,0 +1,26 @@
+id: elem-primitive-layer
+type: element
+confidence: bedrock
+title: "v0.1 primitive layer on iru nouns (B7)"
+content: |
+  Six primitives (list, get, search, filter, enrich, emit) + api
+  escape hatch over a _kind-tagged JSONL stream. 12 kinds: device,
+  blueprint, user, tag, audit_event, threat, behavioral_detection,
+  vulnerability, custom_app, custom_profile, custom_script,
+  ade_device. CEL via the canonical adapter with iru timestamp
+  promotion (*_at, *_date, last_check_in, ts). Three recipes
+  re-instantiate sidestep's three shapes: blueprint-context (join),
+  severity-roll-up (roll-up), device-platform (hoist). Audit
+  schema_version 2 + additive invocation.subdomain_source + MCP verb
+  fields.
+
+  Composite verbs remain v0.2, designed from audit-trail evidence —
+  sidestep's primitives-over-composites ruling carried forward.
+edges:
+  - target: elem-live-validated
+    type: supports
+    note: "field metadata confirmed by live validation"
+provenance:
+  created_by: human
+  created_at: 2026-07-15
+  session: scaffold

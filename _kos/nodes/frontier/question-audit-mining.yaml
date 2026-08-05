@@ -1,0 +1,24 @@
+id: question-audit-mining
+type: question
+confidence: frontier
+title: "Audit-trail mining → v0.2 composite verbs (F3)"
+content: |
+  The trail records REST and MCP calls in one stream. Which composite
+  verbs do iru workflows want (fleet-health, enroll-audit,
+  vuln-exposure)? Deferred until real usage accumulates — the explicit
+  purpose of shipping the audit trail first. The mcp map crosswalk
+  feeds this: the 96 tools with no direct REST-id twin mark surface
+  worth examining. Threshold prior from sidestep (Murat): ~200
+  distinct predicate_text values × ≥10 invocation contexts before
+  sugar design is statistically defensible.
+edges:
+  - target: elem-primitive-layer
+    type: derives
+    note: "mining reads the v2 audit fields the primitives emit"
+  - target: elem-mcp-client-surface
+    type: derives
+    note: "MCP usage is part of the same mining dataset"
+provenance:
+  created_by: human
+  created_at: 2026-07-15
+  session: scaffold

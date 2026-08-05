@@ -1,0 +1,26 @@
+[package]
+name = "stave-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Generated reqwest client for the iru Endpoint Management API. Regenerate via `cargo xtask regen`."
+
+[lib]
+path = "src/lib.rs"
+# Generated code includes doctests pulled from the OpenAPI spec; they are
+# illustrative and not guaranteed to compile against the runtime crate.
+# Real verification lives in stave-sdk integration tests.
+doctest = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+progenitor-client.workspace = true
+futures.workspace = true
+bytes.workspace = true
+uuid.workspace = true
