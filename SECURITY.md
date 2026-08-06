@@ -21,6 +21,33 @@ In-scope examples:
 - Audit-trail redaction failures (sensitive fields not stripped)
 - Supply-chain issues in stave's dependency graph
 
+## The Write-Guard Is Not a Security Control
+
+stave refuses GraphQL mutations (and non-read MCP tools) unconditionally:
+there is no flag, environment variable, or config key that lifts the
+refusal. This is an operational-safety measure — it keeps an
+experimenting or high-temperature agent caller from mutating a
+production tenant by accident — not a security boundary.
+
+Be honest about what it is:
+
+- **It has never been commissioned against a live mutation.** stave's
+  only tenant is production, so verifying "the delete block really
+  blocks a delete" would require attempting a delete against
+  production. We do not do that. The guard ships tested only against
+  local mocks that assert nothing reaches the wire.
+- **Do not lean on it.** The real boundary is the credential. Provision
+  the service account with read-only scopes (`stave auth plan` prints
+  the least-privilege set and the scopes to withhold). A read-only
+  credential means even a stave bug cannot mutate anything, because the
+  server enforces it. The client-side guard is friction on top of that,
+  not a substitute for it.
+- **An agent that can edit files can change stave's config.** The read
+  posture and any client-side setting are reachable by a caller with
+  filesystem access. The credential's scopes are not.
+
+Lean on scopes. Treat the guard as a courtesy.
+
 ## Tenant Data Hygiene
 
 stave's entire subject matter is a live Wiz tenant watching real cloud

@@ -10,9 +10,11 @@
 > `examples/fixtures/` where you can. See SECURITY.md "Tenant Data
 > Hygiene" and `.claude/rules/tenant-data-hygiene.md`.
 
-> Status: schema_version 2, implemented in `crates/stave-sdk/src/audit.rs`.
+> Status: schema_version 3, implemented in `crates/stave-sdk/src/audit.rs`.
 > The schema below is the contract; deviations require bumping
-> `schema_version`.
+> `schema_version`. v3 adds `result: "refused"` (guard refusals),
+> `invocation.session_id`, and — for ad-hoc documents — `posture` and
+> `document_sha256`.
 
 ## Goals
 
@@ -60,14 +62,14 @@ call, and its request body carries the client secret. Minting is
 visible indirectly through `invocation.auth_source` on the call that
 triggered it. Registry credential handling is likewise not audited.
 
-## Schema (v2)
+## Schema (v3)
 
 One JSON object per line. Two shapes share a common header: the
 API shape (below) and the verb shape (further down).
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "trace_id": "0198a2c1-7f3e-7c21-9b04-000000000000",
   "span_id": "0198a2c1-7f3e-7c21-9b04-000000000001",
   "parent_span_id": null,
@@ -80,7 +82,8 @@ API shape (below) and the verb shape (further down).
     "user": "operator",
     "tty": false,
     "auth_source": "keyring",
-    "api_url_source": "derived"
+    "api_url_source": "derived",
+    "session_id": "agent-session-42"
   },
   "verb_phase": "list",
   "synthesis_keys": ["id"],
@@ -108,7 +111,7 @@ API shape (below) and the verb shape (further down).
 
 | Field | Purpose |
 |-------|---------|
-| `schema_version` | Integer. Bump on incompatible schema change. v2 is current. |
+| `schema_version` | Integer. Bump on incompatible schema change. v3 is current. |
 | `trace_id` | UUIDv7. Shared across one CLI invocation; every page of a paginated list shares one. |
 | `span_id` | UUIDv7. Unique per call. |
 | `parent_span_id` | UUIDv7 or null. For nested operations (a composite verb that fans out). |
@@ -120,7 +123,10 @@ API shape (below) and the verb shape (further down).
 | `invocation.user` | `$USER`, best-effort. |
 | `invocation.tty` | `true` if stdout is a tty. |
 | `invocation.auth_source` | Where the client secret was resolved from: `"env"` \| `"keyring"` \| `"config"` \| `null`. `null` means an explicit-token constructor was used and nothing was resolved. |
-| `invocation.api_url_source` | Where the API endpoint came from: `"flag"` \| `"env"` \| `"config"` \| `"derived"`. `"derived"` means it came from the minted token's data-center claim. `null` for explicit-base-URL clients (tests) and MCP-only spans. |
+| `invocation.api_url_source` | Where the API endpoint came from: `"flag"` \| `"env"` \| `"config"` \| `"derived"` \| `"default"`. `"derived"` means it came from the minted token's data-center claim; `"default"` a built-in constant. `null` for explicit-base-URL clients (tests) and MCP-only spans. |
+| `invocation.session_id` | v3. Durable operator-session identity supplied by the invoking agent environment via `STAVE_SESSION_ID`. `trace_id` groups one invocation; this groups a session across invocations, which the per-session refusal detector counts on. `null` when unset. |
+| `posture` | v3. Active read posture (`"curated"` \| `"exploratory"`) for ad-hoc document calls. Absent for curated-operation calls, where posture is not consulted. |
+| `document_sha256` | v3. `sha256:`-prefixed hash of an ad-hoc GraphQL document. Absent for curated operations. The document text is never stored (it can carry tenant data); the hash lets miners group ad-hoc usage by identity. |
 | `verb_phase` | Which verb emitted the line: `list`, `search`, `api`, `filter`, `enrich`, or `mcp`. Absent on legacy-shape lines. |
 | `synthesis_keys` | The kind's primary-key field names, so a miner can join records across runs without re-deriving them. Omitted when empty. |
 | `path_params_source` | Provenance per chain-resolved value, same vocabulary as `api_url_source`. Omitted when empty. The endpoint records under the reserved key `_api_url`. |
@@ -158,8 +164,9 @@ they were not renamed; what changed is what they carry.
 
 | Field | Purpose |
 |-------|---------|
-| `result` | `ok` \| `http_error` \| `graphql_error` \| `network_error` \| `auth_error` \| `redacted_block`. |
+| `result` | `ok` \| `http_error` \| `graphql_error` \| `network_error` \| `auth_error` \| `redacted_block` \| `refused`. |
 | `redacted_fields` | Field paths the redaction policy stripped. Useful for verifying the policy worked. |
+| `refusal` | v3. Present only when `result` is `refused`: `{operation, op_type, reason}`. A guard refusal (a mutation, or an unknown-shape MCP tool) never reaches the wire, so there is no `response` block. This line is where correlation identity for a refusal lives — the refusal MESSAGE itself is byte-stable and carries none (D2). A run of `refused` lines sharing a `session_id` is the experimenting-agent signal (D6). |
 
 `graphql_error` is new in v2 and it is the reason the outcome taxonomy
 could not stay as it was. A GraphQL API answers a failed request with
@@ -176,7 +183,7 @@ or `result`:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "trace_id": "0198a2c1-7f3e-7c21-9b04-00000000000a",
   "span_id": "0198a2c1-7f3e-7c21-9b04-00000000000b",
   "parent_span_id": null,
@@ -281,7 +288,7 @@ writes:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "trace_id": "0198a2c1-7f3e-7c21-9b04-00000000000c",
   "span_id": "0198a2c1-7f3e-7c21-9b04-00000000000d",
   "ts_start": "2026-08-05T18:42:13.500Z",

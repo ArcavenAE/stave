@@ -27,9 +27,15 @@ three directions.
   Auth, audit, redaction, and the write-guard live in one place.
 - **Agent-first.** JSONL output for non-TTY, predictable verb shape,
   stable operation names, structured audit trail, CEL predicates.
-- **Read-only by default.** The tenant is production. Every GraphQL
-  mutation is refused unless you pass `--allow-write`, set
-  `STAVE_ALLOW_WRITE=1`, or persist `stave config set allow_writes true`.
+- **Read-only, unconditionally.** The tenant is production. Every
+  GraphQL mutation and subscription is refused, with no flag, env var,
+  or config key to lift it. Ad-hoc `--query` documents run only under
+  the exploratory read posture (`stave config set posture
+  exploratory`); the default curated posture refuses them. The real
+  boundary is a read-only service account — `stave auth plan` prints
+  the least-privilege scopes to provision one, and the scopes to
+  withhold. This client-side guard is operational friction, not a
+  security control (see SECURITY.md).
 - **Audit as feature.** Every API call emits a JSONL line locally; a
   future pass mines those traces to propose the composite verbs Wiz
   workflows actually need.

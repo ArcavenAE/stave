@@ -11,7 +11,10 @@
 //!   wire, so nothing can hide from the guard.
 
 use graphql_parser::query::{Definition, OperationDefinition};
-pub use stave_api::{OpType, OperationDoc};
+pub use stave_api::{
+    CostHint, Effects, Egress, OpType, OperationDoc, Reversibility, SCOPE_METADATA_PROVISIONAL,
+    Sensitivity, SideEffects,
+};
 
 use crate::error::{Result, StaveError};
 

@@ -23,8 +23,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value, json};
 use stave_sdk::stream::{Record, SourceRef, read_stream, write_record};
 use stave_sdk::{
-    ACCESS_TOKEN_ENV, CallOptions, Client, KindSpec, audit, auth, cel, enrich, kind_spec, kinds,
-    mcp, ops, token,
+    ACCESS_TOKEN_ENV, CallOptions, Client, KindSpec, SCOPE_METADATA_PROVISIONAL, audit, auth, cel,
+    enrich, kind_spec, kinds, mcp, ops, scopes_claim, token,
 };
 use uuid::Uuid;
 
@@ -40,7 +40,7 @@ const MAX_PAGE_SIZE: usize = 500;
 const RECIPES: &[&str] = &["account-context", "severity-roll-up", "entity-hoist"];
 
 const CONFIG_KEYS: &str =
-    "client_id, api_url, allow_writes, token_url, mcp.url, registry.host, registry.username";
+    "client_id, api_url, posture, token_url, mcp.url, registry.host, registry.username";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -127,6 +127,41 @@ enum AuthCmd {
     Status,
     /// Remove the stored client secret and the cached token.
     Logout,
+    /// List the scopes the current token carries (decoded from the
+    /// token at hand; no mint, no API call).
+    Scopes,
+    /// Answer whether the current token can run an operation. Exit 0
+    /// yes, 1 no. Reads the token's scopes against the registry.
+    CanI {
+        /// Operation name. Run `stave ops list` to discover.
+        operation: String,
+    },
+    /// Print the least-privilege scope set to provision a service
+    /// account for the selected operations, and the scopes to withhold.
+    Plan(AuthPlanArgs),
+}
+
+#[derive(clap::Args, Debug)]
+#[command(
+    long_about = "Produce the provisioning checklist for a Wiz service account.\n\n\
+                  GRANT lists the least-privilege union of scopes the selected operations \
+                  need (default: all curated operations). DO NOT GRANT names scopes to \
+                  withhold and why. Scope names are PROVISIONAL until validated against a \
+                  live tenant.\n\n\
+                  --check compares the scopes the current token carries against what the \
+                  selected operations require, exits nonzero on drift, and reports MISSING \
+                  (credential is unusable for some operation) separately from EXCESS \
+                  (credential is over-privileged)."
+)]
+struct AuthPlanArgs {
+    /// Operations to plan for. Repeatable. Default: all curated.
+    #[arg(long = "op", value_name = "NAME")]
+    ops: Vec<String>,
+
+    /// Compare the current token's scopes against the requirement and
+    /// report missing vs excess. Exits nonzero on any drift.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -136,9 +171,9 @@ enum AuthCmd {
                   and reads the secret without echoing it. In a pipeline, pass --stdin so the \
                   secret arrives on stdin and nothing prompts:\n\n  \
                   printf '%s' \"$WIZ_CLIENT_SECRET\" | stave auth login --client-id <id> --stdin\n\n\
-                  The secret goes to the platform keyring. The client ID and any --api-url go \
-                  to the config file. The cached token is cleared so a rotated secret cannot be \
-                  shadowed by a token minted from the old one.\n\n\
+                  The secret goes to the platform keyring. The client ID and any --api-url / \
+                  --token-url go to the config file. The cached token is cleared so a rotated \
+                  secret cannot be shadowed by a token minted from the old one.\n\n\
                   stave then mints a token to prove the credentials work and reports the \
                   endpoint it resolved (including the data-center claim derivation). Pass \
                   --no-verify to skip that round trip; stored values are kept either way."
@@ -156,6 +191,12 @@ struct AuthLoginArgs {
     /// (`https://api.<region>.app.wiz.io/graphql`).
     #[arg(long, value_name = "URL")]
     api_url: Option<String>,
+
+    /// Persist `[auth] token_url`, the OAuth token endpoint. Only
+    /// needed when the tenant's endpoint differs from the built-in
+    /// default (gov or Auth0-era tenants).
+    #[arg(long, value_name = "URL")]
+    token_url: Option<String>,
 
     /// Store the credentials without minting a verification token.
     #[arg(long)]
@@ -225,7 +266,7 @@ struct RegistryLoginArgs {
                   path              print the resolved config path\n  \
                   set <key> <val>   set one key\n  \
                   unset <key>       clear one key\n\n\
-                  Keys: client_id, api_url, allow_writes, token_url, mcp.url, registry.host, \
+                  Keys: client_id, api_url, posture, token_url, mcp.url, registry.host, \
                   registry.username.\n\n\
                   Secrets are not settable here: use `stave auth login` and \
                   `stave registry login` so they land in the platform keyring. Setting a key \
@@ -284,6 +325,14 @@ enum OpsCmd {
         /// Operation name. Run `stave ops list` to discover.
         name: String,
     },
+    /// Report the Wiz scopes and effect metadata each operation needs.
+    /// Offline; pure registry metadata, no tenant contact. Scope names
+    /// are provisional until validated against a live tenant.
+    Permissions {
+        /// Substring filter on the operation name.
+        #[arg(long, value_name = "TEXT")]
+        filter: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +349,10 @@ enum OpsCmd {
                   --var status=OPEN sends a string.\n\n\
                   Ad-hoc documents are parsed before anything reaches the wire: an \
                   unparseable document is refused, and a mutation or subscription anywhere in \
-                  it needs --allow-write exactly like a curated mutation.\n\n\
+                  it is refused unconditionally (stave is read-only against live tenants). \
+                  Ad-hoc documents run only under the exploratory read posture \
+                  (`stave config set posture exploratory`); the default curated posture \
+                  refuses them.\n\n\
                   Examples:\n  \
                   stave api list_issues --var first=5\n  \
                   stave api list_projects --vars '{\"first\": 100}'\n  \
@@ -328,11 +380,6 @@ struct ApiArgs {
     /// data-center claim.
     #[arg(long, value_name = "URL")]
     api_url: Option<String>,
-
-    /// Permit a mutation. Off by default: stave treats the tenant as
-    /// production.
-    #[arg(long)]
-    allow_write: bool,
 
     /// Skip operation and response detail in the audit trail (a stub
     /// line is still recorded).
@@ -569,10 +616,6 @@ struct McpCallArgs {
     /// Tool arguments as a JSON object.
     #[arg(long, value_name = "JSON")]
     args: Option<String>,
-
-    /// Permit a tool whose name is not read-shaped.
-    #[arg(long)]
-    allow_write: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +676,9 @@ fn run_auth(args: AuthArgs) -> anyhow::Result<()> {
         AuthCmd::Login(login) => auth_login(login),
         AuthCmd::Status => auth_status(),
         AuthCmd::Logout => auth_logout(),
+        AuthCmd::Scopes => auth_scopes(),
+        AuthCmd::CanI { operation } => auth_can_i(&operation),
+        AuthCmd::Plan(plan) => auth_plan(plan),
     }
 }
 
@@ -662,17 +708,29 @@ fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let api_url_owned = api_url.map(str::to_string);
+    let token_url_arg = args
+        .token_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let token_url_owned = token_url_arg.map(str::to_string);
     let client_id_owned = client_id.clone();
     let path = auth::write_config(|cfg| {
         cfg.auth.client_id = Some(client_id_owned);
         if let Some(url) = api_url_owned {
             cfg.default.api_url = Some(url);
         }
+        if let Some(url) = token_url_owned {
+            cfg.auth.token_url = Some(url);
+        }
     })
     .map_err(|e| anyhow!("{e}"))?;
     let mut persisted = vec!["client_id"];
     if api_url.is_some() {
         persisted.push("api_url");
+    }
+    if token_url_arg.is_some() {
+        persisted.push("token_url");
     }
     eprintln!(
         "stave auth: persisted {} to {}",
@@ -688,7 +746,7 @@ fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let token_url = auth::resolve_token_url().map_err(|e| anyhow!("{e}"))?;
+    let token_url = auth::resolve_token_url(token_url_arg).map_err(|e| anyhow!("{e}"))?;
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -779,8 +837,10 @@ fn auth_status() -> anyhow::Result<()> {
         ("client_id", client_id_line),
         ("client_secret", secret_line),
         ("api_url", api_url_status()),
+        ("token_url", token_url_status()),
         ("token_cache", token_cache_status()),
-        ("writes", allow_writes_status()),
+        ("writes", writes_status()),
+        ("posture", posture_status()),
         ("audit_dir", audit_dir_status()),
         ("config", config_path_status()),
     ];
@@ -810,6 +870,16 @@ fn auth_logout() -> anyhow::Result<()> {
          `stave config unset client_id` / `stave config unset api_url`."
     );
     Ok(())
+}
+
+/// The OAuth token endpoint as `auth status` sees it. The chain
+/// bottoms out at the built-in default, so this always resolves;
+/// the source tells the user whether they overrode it.
+fn token_url_status() -> String {
+    match auth::resolve_token_url(None) {
+        Ok(r) => format!("{} (source: {})", r.value, r.source.as_str()),
+        Err(e) => format!("error ({e})"),
+    }
 }
 
 /// The endpoint chain as `auth status` sees it, including the derivation
@@ -853,25 +923,25 @@ fn token_cache_status() -> String {
     }
 }
 
-fn allow_writes_status() -> String {
-    let env_opt_in = std::env::var(auth::ALLOW_WRITE_ENV)
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false);
-    if env_opt_in {
-        return format!(
-            "allowed by standing opt-in (source: {})",
-            auth::ALLOW_WRITE_ENV
-        );
-    }
-    match auth::read_config() {
-        Ok(Some(cfg)) if cfg.default.allow_writes == Some(true) => {
-            "allowed by standing opt-in (source: config)".to_string()
-        }
-        Ok(_) => "guarded (read-only; pass --allow-write per call to override)".to_string(),
-        Err(e) => format!("guarded (config unreadable: {e})"),
+fn writes_status() -> String {
+    // D1: mutations are refused unconditionally. There is no opt-in to
+    // report; this line exists so `auth status` states the posture
+    // plainly rather than leaving it implied.
+    "refused (read-only against live tenants; not configurable)".to_string()
+}
+
+fn posture_status() -> String {
+    // D11: the read posture governs ad-hoc documents only.
+    match auth::resolve_posture() {
+        Ok(p) => match p {
+            auth::Posture::Curated => {
+                "curated (curated operations only; ad-hoc --query refused)".to_string()
+            }
+            auth::Posture::Exploratory => {
+                "exploratory (ad-hoc --query permitted; mutations still refused)".to_string()
+            }
+        },
+        Err(e) => format!("error ({e})"),
     }
 }
 
@@ -1108,11 +1178,16 @@ fn config_set(key: &str, value: &str) -> anyhow::Result<()> {
         "client_id" => auth::write_config(|cfg| cfg.auth.client_id = Some(owned)),
         "api_url" => auth::write_config(|cfg| cfg.default.api_url = Some(owned)),
         "token_url" => auth::write_config(|cfg| cfg.auth.token_url = Some(owned)),
-        "allow_writes" => {
-            let parsed: bool = trimmed
-                .parse()
-                .map_err(|_| anyhow!("allow_writes must be `true` or `false`, got {trimmed:?}"))?;
-            auth::write_config(|cfg| cfg.default.allow_writes = Some(parsed))
+        "posture" => {
+            match trimmed {
+                "curated" | "exploratory" => {}
+                other => {
+                    return Err(anyhow!(
+                        "posture must be `curated` or `exploratory`, got {other:?}"
+                    ));
+                }
+            }
+            auth::write_config(|cfg| cfg.default.posture = Some(owned))
         }
         "mcp.url" => auth::write_config(|cfg| cfg.mcp.url = Some(owned)),
         "registry.host" => auth::write_config(|cfg| cfg.registry.host = Some(owned)),
@@ -1137,7 +1212,7 @@ fn config_unset(key: &str) -> anyhow::Result<()> {
         "client_id" => auth::write_config(|cfg| cfg.auth.client_id = None),
         "api_url" => auth::write_config(|cfg| cfg.default.api_url = None),
         "token_url" => auth::write_config(|cfg| cfg.auth.token_url = None),
-        "allow_writes" => auth::write_config(|cfg| cfg.default.allow_writes = None),
+        "posture" => auth::write_config(|cfg| cfg.default.posture = None),
         "mcp.url" => auth::write_config(|cfg| cfg.mcp.url = None),
         "registry.host" => auth::write_config(|cfg| cfg.registry.host = None),
         "registry.username" => auth::write_config(|cfg| cfg.registry.username = None),
@@ -1162,6 +1237,7 @@ fn run_ops(args: OpsArgs) -> anyhow::Result<()> {
     match args.cmd {
         OpsCmd::List { filter } => ops_list(filter.as_deref()),
         OpsCmd::Show { name } => ops_show(&name),
+        OpsCmd::Permissions { filter } => ops_permissions(filter.as_deref()),
     }
 }
 
@@ -1208,17 +1284,288 @@ fn ops_show(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `stave ops permissions` — static registry report (D5). Offline; no
+/// token, no API call. Scope names are provisional (D3) until F1.
+fn ops_permissions(filter: Option<&str>) -> anyhow::Result<()> {
+    let needle = filter.map(str::to_lowercase);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for (idx, op) in ops::all().iter().enumerate() {
+        if let Some(n) = &needle {
+            if !op.name.to_lowercase().contains(n) {
+                continue;
+            }
+        }
+        let effects = op.effects.map(|e| {
+            json!({
+                "reversibility": reversibility_str(e.reversibility),
+                "side_effects": side_effects_str(e.side_effects),
+                "egress": egress_str(e.egress),
+            })
+        });
+        let record = Record::wrap(
+            "operation_permissions",
+            SourceRef::now("ops:permissions", idx),
+            json!({
+                "name": op.name,
+                "op_type": op.op_type.as_str(),
+                "required_scopes": op.required_scopes,
+                "sensitivity": op.sensitivity.as_str(),
+                "cost_hint": op.cost_hint.as_str(),
+                "effects": effects,
+                "scopes_provisional": SCOPE_METADATA_PROVISIONAL,
+            }),
+        );
+        write_record(&mut out, &record).map_err(|e| anyhow!("{e}"))?;
+    }
+    Ok(())
+}
+
+fn reversibility_str(r: stave_sdk::Reversibility) -> &'static str {
+    match r {
+        stave_sdk::Reversibility::Reversible => "reversible",
+        stave_sdk::Reversibility::Irreversible => "irreversible",
+        stave_sdk::Reversibility::Unknown => "unknown",
+    }
+}
+
+fn side_effects_str(s: stave_sdk::SideEffects) -> &'static str {
+    match s {
+        stave_sdk::SideEffects::None => "none",
+        stave_sdk::SideEffects::Notifies => "notifies",
+        stave_sdk::SideEffects::TriggersIntegrations => "triggers-integrations",
+        stave_sdk::SideEffects::Unknown => "unknown",
+    }
+}
+
+fn egress_str(e: stave_sdk::Egress) -> &'static str {
+    match e {
+        stave_sdk::Egress::None => "none",
+        stave_sdk::Egress::ProducesEgressArtifact => "produces-egress-artifact",
+        stave_sdk::Egress::Unknown => "unknown",
+    }
+}
+
+/// The scopes the token at hand carries, and which claim field named
+/// them. `None` when no token is available or no scope claim matched.
+/// Never mints — reads env or the cache only (`stave auth scopes`).
+fn resolved_scopes() -> Option<(Vec<String>, &'static str)> {
+    let token = available_access_token()?;
+    scopes_claim(&token)
+}
+
+/// `read:all` is treated as granting any `read:*` scope. Provisional
+/// rule (D3) until F1 confirms Wiz's scope-implication semantics.
+fn scope_granted(required: &str, granted: &[String]) -> bool {
+    if granted.iter().any(|g| g == required) {
+        return true;
+    }
+    if required.starts_with("read:") && granted.iter().any(|g| g == "read:all") {
+        return true;
+    }
+    false
+}
+
+fn auth_scopes() -> anyhow::Result<()> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match resolved_scopes() {
+        Some((scopes, field)) => {
+            let record = json!({
+                "scopes": scopes,
+                "claim_field": field,
+                "provisional": SCOPE_METADATA_PROVISIONAL,
+            });
+            writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
+            Ok(())
+        }
+        None => Err(anyhow!(
+            "no token scopes available. Provide a token first: `stave auth login` (mints \
+             one), or set {}. If a token is present but carries no recognized scope claim, \
+             the claim field is provisional until live validation.",
+            ACCESS_TOKEN_ENV
+        )),
+    }
+}
+
+fn auth_can_i(operation: &str) -> anyhow::Result<()> {
+    let op = ops::find(operation).map_err(|e| anyhow!("{e}"))?;
+    let (granted, _field) = resolved_scopes().ok_or_else(|| {
+        anyhow!(
+            "no token scopes available to check against. Run `stave auth login` or set {}.",
+            ACCESS_TOKEN_ENV
+        )
+    })?;
+    let missing: Vec<&str> = op
+        .required_scopes
+        .iter()
+        .copied()
+        .filter(|s| !scope_granted(s, &granted))
+        .collect();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let allowed = missing.is_empty();
+    let record = json!({
+        "operation": op.name,
+        "allowed": allowed,
+        "required_scopes": op.required_scopes,
+        "missing_scopes": missing,
+        "provisional": SCOPE_METADATA_PROVISIONAL,
+    });
+    writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
+    if allowed {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+fn auth_plan(args: AuthPlanArgs) -> anyhow::Result<()> {
+    // Resolve the selected operations (default: all curated).
+    let selected: Vec<&'static ops::OperationDoc> = if args.ops.is_empty() {
+        ops::all().iter().collect()
+    } else {
+        let mut v = Vec::new();
+        for name in &args.ops {
+            v.push(ops::find(name).map_err(|e| anyhow!("{e}"))?);
+        }
+        v
+    };
+
+    // Least-privilege union of required scopes.
+    let mut grant: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for op in &selected {
+        for s in op.required_scopes {
+            grant.insert((*s).to_string());
+        }
+    }
+
+    // DO NOT GRANT: scopes present anywhere in the registry that the
+    // selected set does not require (future/other-verb scopes).
+    let mut all_scopes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for op in ops::all() {
+        for s in op.required_scopes {
+            all_scopes.insert((*s).to_string());
+        }
+    }
+    let do_not_grant: Vec<String> = all_scopes.difference(&grant).cloned().collect();
+    let grant_vec: Vec<String> = grant.iter().cloned().collect();
+
+    if args.check {
+        return auth_plan_check(&grant_vec);
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let record = json!({
+        "grant": grant_vec,
+        "do_not_grant": do_not_grant,
+        "operations": selected.iter().map(|o| o.name).collect::<Vec<_>>(),
+        "provisional": SCOPE_METADATA_PROVISIONAL,
+        "notes": [
+            "Create a Custom Integration (GraphQL API) service account in the Wiz portal \
+             (Settings -> Access Management -> Service Accounts) with exactly the GRANT scopes.",
+            "Prefer the enumerated GRANT set over a read:all bundle.",
+            "DO NOT GRANT: withholding these is the read-only boundary. When a write verb is \
+             ever needed, provision a SEPARATE write-scoped service account; never widen this \
+             read-only one.",
+            "Scope names are provisional until validated against a live tenant."
+        ],
+    });
+    // On a TTY, present the checklist readably; otherwise JSON.
+    if out.is_terminal() {
+        writeln!(out, "GRANT (least-privilege, for the selected operations):")?;
+        for s in &grant_vec {
+            writeln!(out, "  {s}")?;
+        }
+        writeln!(out, "\nDO NOT GRANT (withhold; the read-only boundary):")?;
+        if do_not_grant.is_empty() {
+            writeln!(
+                out,
+                "  (none — every registry scope is required by the selection)"
+            )?;
+        }
+        for s in &do_not_grant {
+            writeln!(out, "  {s}")?;
+        }
+        writeln!(
+            out,
+            "\nProvision a Custom Integration (GraphQL API) service account with exactly the \
+             GRANT scopes. When a write verb is ever needed, provision a SEPARATE write-scoped \
+             account; never widen this one. Scope names are provisional until live validation."
+        )?;
+    } else {
+        writeln!(out, "{record}")?;
+    }
+    Ok(())
+}
+
+/// `auth plan --check`: compare the token's scopes against the
+/// requirement, reporting MISSING (unusable) vs EXCESS
+/// (over-privileged) separately. Exits nonzero on any drift.
+fn auth_plan_check(required: &[String]) -> anyhow::Result<()> {
+    let (granted, _field) = resolved_scopes().ok_or_else(|| {
+        anyhow!(
+            "no token scopes available to check against. Run `stave auth login` or set {}.",
+            ACCESS_TOKEN_ENV
+        )
+    })?;
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|s| !scope_granted(s, &granted))
+        .cloned()
+        .collect();
+    // Excess: a granted scope that no required scope matches. read:all
+    // is a deliberate bundle, but for the purpose of least-privilege
+    // reporting it is still "more than required" when the selection
+    // does not literally list it.
+    let excess: Vec<String> = granted
+        .iter()
+        .filter(|g| !required.iter().any(|r| r == *g))
+        .cloned()
+        .collect();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let record = json!({
+        "required": required,
+        "granted": granted,
+        "missing": missing,
+        "excess": excess,
+        "provisional": SCOPE_METADATA_PROVISIONAL,
+    });
+    writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
+    if missing.is_empty() && excess.is_empty() {
+        Ok(())
+    } else {
+        // Nonzero on any drift; the record above distinguishes the two
+        // directions (missing = unusable, excess = over-privileged).
+        std::process::exit(1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // api
 // ---------------------------------------------------------------------------
 
 fn run_api(args: ApiArgs) -> anyhow::Result<()> {
     let variables = merge_variables(args.vars.as_deref(), &args.var)?;
-    let allow_write = resolve_allow_write(args.allow_write)?;
+    let posture = auth::resolve_posture().map_err(|e| anyhow!("{e}"))?;
+    // D11: ad-hoc documents (--query) run only under the exploratory
+    // posture. Curated operations (by name) always run. Mutations are
+    // refused unconditionally regardless of posture, in the SDK.
+    if args.query.is_some() && posture != auth::Posture::Curated {
+        // exploratory: allowed to proceed
+    } else if args.query.is_some() {
+        return Err(anyhow!(
+            "read posture is `curated`: ad-hoc GraphQL documents (--query) are refused. \
+             Run a curated operation by name (`stave ops list`), or deliberately enter the \
+             exploratory read posture with `stave config set posture exploratory`."
+        ));
+    }
     let opts = CallOptions {
         no_audit: args.no_audit,
         verb_phase: Some("api"),
-        allow_write,
+        posture: args.query.as_ref().map(|_| posture.as_str().to_string()),
         ..Default::default()
     };
 
@@ -1982,13 +2329,11 @@ fn mcp_tools(filter: Option<&str>) -> anyhow::Result<()> {
 }
 
 fn mcp_call(args: McpCallArgs) -> anyhow::Result<()> {
-    if !mcp::is_read_only_tool(&args.tool) && !resolve_allow_write(args.allow_write)? {
+    if !mcp::is_read_only_tool(&args.tool) {
         return Err(anyhow!(
-            "write-guard: MCP tool '{}' is not read-shaped and stave is read-only by default \
-             against the live tenant. To proceed deliberately, pass --allow-write, set \
-             {}=1, or persist `stave config set allow_writes true`.",
-            args.tool,
-            auth::ALLOW_WRITE_ENV
+            "write-guard: stave is read-only against live tenants; MCP tool '{}' is not \
+             read-shaped and is refused. This is not configurable in this session.",
+            args.tool
         ));
     }
 
@@ -2109,7 +2454,7 @@ async fn mcp_bearer() -> stave_sdk::Result<String> {
     }
     let client_id = auth::resolve_client_id(None)?.ok_or_else(auth::credentials_chain_error)?;
     let client_secret = auth::resolve_client_secret()?.ok_or_else(auth::credentials_chain_error)?;
-    let token_url = auth::resolve_token_url()?;
+    let token_url = auth::resolve_token_url(None)?;
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -2127,15 +2472,6 @@ async fn mcp_bearer() -> stave_sdk::Result<String> {
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
-
-/// The effective write permission: the per-call flag first, then the
-/// standing opt-in chain (`STAVE_ALLOW_WRITE`, then config).
-fn resolve_allow_write(flag: bool) -> anyhow::Result<bool> {
-    if flag {
-        return Ok(true);
-    }
-    auth::writes_allowed_by_default().map_err(|e| anyhow!("{e}"))
-}
 
 fn block_on<F: std::future::Future>(fut: F) -> F::Output {
     let runtime = tokio::runtime::Builder::new_current_thread()

@@ -5,7 +5,7 @@
 //! composite verbs will be mined from (charter F4). So the fields that
 //! carry mining signal are pinned here rather than left to inspection:
 //!
-//!   * `schema_version` is 2 on every emission
+//!   * `schema_version` is 3 on every emission
 //!   * `verb_phase` names which primitive ran
 //!   * `filter` records the predicate text plus a value-independent
 //!     `predicate_ast_shape`, so predicates cluster across runs without
@@ -52,7 +52,7 @@ fn filter_emits_one_verb_line_with_the_predicate_and_its_outcome() {
     assert!(out.status.success(), "{}", stderr_of(&out));
 
     let line = only_line(&sandbox);
-    assert_eq!(line["schema_version"], 2);
+    assert_eq!(line["schema_version"], 3);
     assert_eq!(line["verb_phase"], "filter");
     assert_eq!(line["predicate_text"], r#"severity == "CRITICAL""#);
     assert!(
@@ -205,7 +205,7 @@ fn enrich_emits_one_verb_line_with_the_recipe_and_its_outcome() {
     assert!(out.status.success(), "{}", stderr_of(&out));
 
     let line = only_line(&sandbox);
-    assert_eq!(line["schema_version"], 2);
+    assert_eq!(line["schema_version"], 3);
     assert_eq!(line["verb_phase"], "enrich");
     assert_eq!(line["recipe_id"], "account-context");
     assert_eq!(line["transform_outcome"]["transformed_count"], 4);

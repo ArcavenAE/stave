@@ -15,11 +15,13 @@ pub enum StaveError {
     #[error("invalid parameter '{0}': {1}")]
     InvalidParam(String, String),
 
+    // D2 (docs/design/read-only-posture-and-permissions-report.md):
+    // the refusal is terminal and byte-stable. It must never name a
+    // flag, env var, or config key, and must not vary per operation —
+    // correlation identity lives in the audit line, not the message.
     #[error(
-        "write-guard: operation '{operation}' is a {op_type} and stave is \
-         read-only by default against the live tenant. To proceed deliberately, pass \
-         --allow-write, set STAVE_ALLOW_WRITE=1, or persist \
-         `stave config set allow_writes true`."
+        "write-guard: stave is read-only against live tenants; mutations and \
+         subscriptions are refused. This is not configurable in this session."
     )]
     WriteGuard { operation: String, op_type: String },
 

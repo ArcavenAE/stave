@@ -29,6 +29,88 @@ impl OpType {
     }
 }
 
+/// Scope names below follow the vendor's `verb:resource` grammar as
+/// assembled from integration-vendor documentation. They are
+/// PROVISIONAL until F1 live validation confirms them against the
+/// tenant (the official scope list sits behind tenant-authenticated
+/// docs). Scope-dependent surfaces (`stave auth plan`, `can-i`) must
+/// mark their output provisional while this is true.
+pub const SCOPE_METADATA_PROVISIONAL: bool = true;
+
+/// What class of data a READ returns (D4a). Descriptive, never a
+/// gate: the credential's scopes decide access; this exists so the
+/// tool can say what an operation exposes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sensitivity {
+    Normal,
+    Identity,
+    Posture,
+    Unknown,
+}
+
+impl Sensitivity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Sensitivity::Normal => "normal",
+            Sensitivity::Identity => "identity",
+            Sensitivity::Posture => "posture",
+            Sensitivity::Unknown => "unknown",
+        }
+    }
+}
+
+/// Advisory query-cost hint (D4a). Informs future depth/size limits;
+/// never a gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CostHint {
+    Light,
+    Heavy,
+    Unknown,
+}
+
+impl CostHint {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CostHint::Light => "light",
+            CostHint::Heavy => "heavy",
+            CostHint::Unknown => "unknown",
+        }
+    }
+}
+
+/// Authored mutation-consequence judgment (D4). The tier is the
+/// conservative join of the scope-prefix tier and these axes; any
+/// `Unknown` resolves to the strictest tier. Describes MUTATION
+/// consequences only — read exposure is `Sensitivity`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Effects {
+    pub reversibility: Reversibility,
+    pub side_effects: SideEffects,
+    pub egress: Egress,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reversibility {
+    Reversible,
+    Irreversible,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideEffects {
+    None,
+    Notifies,
+    TriggersIntegrations,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Egress {
+    None,
+    ProducesEgressArtifact,
+    Unknown,
+}
+
 /// One curated operation: a named, embedded GraphQL document plus the
 /// metadata the SDK needs to execute and audit it.
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +126,17 @@ pub struct OperationDoc {
     pub root_field: &'static str,
     /// One-line human description for `stave ops list`.
     pub description: &'static str,
+    /// Wiz API scopes this operation needs (D3, provisional until F1).
+    /// `cargo xtask check-ops` fails when this is empty: no verb enters
+    /// the registry without declaring its permission cost.
+    pub required_scopes: &'static [&'static str],
+    /// What class of data this READ returns (D4a).
+    pub sensitivity: Sensitivity,
+    /// Advisory query-cost hint (D4a).
+    pub cost_hint: CostHint,
+    /// Mutation-consequence axes (D4). `None` for queries: the effects
+    /// block describes mutation consequences only.
+    pub effects: Option<Effects>,
 }
 
 /// All curated operations, in stable order.
@@ -54,6 +147,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "issuesV2",
         description: "Issues with severity, status, and the affected entity snapshot",
+        required_scopes: &["read:issues"],
+        sensitivity: Sensitivity::Posture,
+        cost_hint: CostHint::Heavy,
+        effects: None,
     },
     OperationDoc {
         name: "list_vulnerability_findings",
@@ -61,6 +158,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "vulnerabilityFindings",
         description: "Vulnerability findings with vendor severity and detection window",
+        required_scopes: &["read:vulnerabilities"],
+        sensitivity: Sensitivity::Posture,
+        cost_hint: CostHint::Heavy,
+        effects: None,
     },
     OperationDoc {
         name: "list_cloud_resources",
@@ -68,6 +169,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "cloudResources",
         description: "Cloud resources with type, platform, and subscription",
+        required_scopes: &["read:resources"],
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Heavy,
+        effects: None,
     },
     OperationDoc {
         name: "list_projects",
@@ -75,6 +180,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "projects",
         description: "Wiz projects (slug, description, archived)",
+        required_scopes: &["read:projects"],
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
     OperationDoc {
         name: "list_reports",
@@ -82,6 +191,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "reports",
         description: "Configured reports",
+        required_scopes: &["read:reports"],
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
     OperationDoc {
         name: "list_controls",
@@ -89,6 +202,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "controls",
         description: "Controls with severity and enablement",
+        required_scopes: &["read:controls"],
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
     OperationDoc {
         name: "list_security_frameworks",
@@ -96,6 +213,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "securityFrameworks",
         description: "Security/compliance frameworks",
+        required_scopes: &["read:security_frameworks"],
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
     OperationDoc {
         name: "list_cloud_accounts",
@@ -103,6 +224,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "cloudAccounts",
         description: "Connected cloud accounts with provider and status",
+        required_scopes: &["read:cloud_accounts"],
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
     OperationDoc {
         name: "list_users",
@@ -110,6 +235,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "users",
         description: "Portal users",
+        required_scopes: &["read:users"],
+        sensitivity: Sensitivity::Identity,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
     OperationDoc {
         name: "list_service_accounts",
@@ -117,6 +246,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "serviceAccounts",
         description: "API service accounts",
+        required_scopes: &["read:service_accounts"],
+        sensitivity: Sensitivity::Identity,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
     OperationDoc {
         name: "list_audit_log_entries",
@@ -124,6 +257,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "auditLogEntries",
         description: "Tenant audit log entries",
+        required_scopes: &["admin:audit"],
+        sensitivity: Sensitivity::Posture,
+        cost_hint: CostHint::Heavy,
+        effects: None,
     },
     OperationDoc {
         name: "list_cloud_configuration_rules",
@@ -131,6 +268,10 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "cloudConfigurationRules",
         description: "Cloud configuration rules with severity and enablement",
+        required_scopes: &["read:cloud_configuration"],
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Light,
+        effects: None,
     },
 ];
 
@@ -146,6 +287,45 @@ mod tests {
     #[test]
     fn twelve_operations_registered() {
         assert_eq!(OPERATIONS.len(), 12);
+    }
+
+    #[test]
+    fn every_operation_declares_required_scopes() {
+        // D3: no verb may enter the registry without declaring its
+        // permission cost. This is the always-on companion to the
+        // check-ops registry gate (which additionally needs the
+        // vendored schema); this one runs with `cargo test`, no
+        // service account and no schema required.
+        for op in OPERATIONS {
+            assert!(
+                !op.required_scopes.is_empty(),
+                "operation {} declares no required_scopes (D3)",
+                op.name
+            );
+            for scope in op.required_scopes {
+                assert!(
+                    scope.contains(':'),
+                    "operation {} scope {:?} is not verb:resource shaped",
+                    op.name,
+                    scope
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn queries_carry_no_mutation_effects_block() {
+        // D4: the effects block describes mutation consequences only.
+        // v0.1 curates only reads, so every effects field is None.
+        for op in OPERATIONS {
+            if op.op_type == OpType::Query {
+                assert!(
+                    op.effects.is_none(),
+                    "query {} carries a mutation effects block",
+                    op.name
+                );
+            }
+        }
     }
 
     #[test]

@@ -101,9 +101,23 @@ Directory Specification, 12-factor §III. Operative form below.
 - **Determinism.** Same argv + same stdin + same config → same stdout
   + same exit code. No hidden RNG. Time is bound at call time (`now`
   per query) and recorded in the audit line.
-- **Repair-friendly errors.** Errors carry: what was expected, what
-  was received, where (line/column/path), at least one concrete next
-  step. No stack traces in release builds.
+- **Repair-friendly errors — maps, with one exception: walls.** Most
+  errors are *maps*: a lost caller needs what was expected, what was
+  received, where (line/column/path), and at least one concrete next
+  step. Resolution-chain errors (missing scope, unset endpoint, absent
+  credential) are the canonical maps — name every layer and its fix.
+  **A guard refusal is not a map; it is a wall.** When the tool is
+  deliberately refusing an action (a mutation against a live tenant, a
+  non-read MCP tool, an ad-hoc document under the curated posture), the
+  message states the posture and stops. It names no flag, env var, or
+  config key that would lift the refusal, and it is byte-identical on
+  every firing. A caller at a fence must not be handed the location of
+  the ladder — and a high-temperature agent caller reads a
+  "pass --allow-write to proceed" hint as an instruction to do exactly
+  that. Correlation identity for a refusal lives in the audit line, not
+  the message. No stack traces in release builds either way. (This
+  maps-vs-walls split is D2 in
+  `docs/design/read-only-posture-and-permissions-report.md`.)
 - **One thing well.** Primitives transform a stream once. Composites
   are recipes (shell, makefile, future v0.2 sugar) until evidence
   justifies promotion. See finding-001.

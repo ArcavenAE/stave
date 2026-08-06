@@ -29,7 +29,11 @@ pub use client::{ACCESS_TOKEN_ENV, BASE_URL_ENV, CallOptions, Client};
 pub use error::{Result, StaveError};
 pub use kinds::{KindSpec, all_kinds, extract_items, kind_spec};
 pub use mcp::{McpClient, McpTool};
-pub use ops::{DocumentMeta, OpType, OperationDoc, classify_document};
+pub use ops::{
+    CostHint, DocumentMeta, Effects, Egress, OpType, OperationDoc, Reversibility,
+    SCOPE_METADATA_PROVISIONAL, Sensitivity, SideEffects, classify_document,
+};
+pub use token::scopes_claim;
 
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -1,7 +1,8 @@
 //! Resolution-chain coverage: the client ID, the client secret, the
-//! tenant GraphQL endpoint, and the standing write opt-in, each resolved
-//! through flag, then env, then config, then (for the endpoint) derived
-//! from the minted token's data-center claim.
+//! tenant GraphQL endpoint, and the read posture, each resolved through
+//! flag, then env, then config, then (for the endpoint) derived from
+//! the minted token's data-center claim. Mutations refuse
+//! unconditionally (D1) — there is no write opt-in to resolve.
 //!
 //! Also covers what the chains report and what they refuse to report:
 //! `auth status` names every source without printing a secret value,
@@ -247,6 +248,69 @@ fn api_url_derivation_is_skipped_for_a_token_without_the_claim() {
 }
 
 // ---------------------------------------------------------------------------
+// keyring kill-switch: the sandbox disables the platform keyring
+// ---------------------------------------------------------------------------
+
+#[test]
+fn logout_with_the_keyring_disabled_reports_nothing_and_never_prompts() {
+    // The sandbox sets STAVE_KEYRING=off, so logout must not open the
+    // real keychain (which could raise a blocking macOS access prompt);
+    // it reports that there was nothing to remove and exits zero.
+    let sandbox = Sandbox::new();
+    let mut cmd = sandbox.cmd();
+    cmd.args(["auth", "logout"]);
+    let out = run(&mut cmd);
+    assert!(out.status.success(), "logout: {}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("no keyring entry to remove"),
+        "want the no-entry report, got {}",
+        stderr_of(&out)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// token endpoint chain: default, env, config
+// ---------------------------------------------------------------------------
+
+#[test]
+fn token_url_bottoms_out_at_the_builtin_default() {
+    let sandbox = Sandbox::new();
+    let (_, status) = auth_status(&sandbox, &env_credentials());
+    assert_eq!(
+        field(&status, "token_url"),
+        "https://auth.app.wiz.io/oauth/token (source: default)"
+    );
+}
+
+#[test]
+fn token_url_resolves_from_env_and_names_the_source() {
+    let sandbox = Sandbox::new();
+    let mut env = env_credentials();
+    env.push(("STAVE_TOKEN_URL", "https://auth.example.test/oauth/token"));
+    let (_, status) = auth_status(&sandbox, &env);
+    assert_eq!(
+        field(&status, "token_url"),
+        "https://auth.example.test/oauth/token (source: env)"
+    );
+}
+
+#[test]
+fn token_url_resolves_from_config_when_env_is_absent() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config(
+        r#"
+[auth]
+token_url = "https://auth.config.test/oauth/token"
+"#,
+    );
+    let (_, status) = auth_status(&sandbox, &env_credentials());
+    assert_eq!(
+        field(&status, "token_url"),
+        "https://auth.config.test/oauth/token (source: config)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // chain-naming errors on the working path
 // ---------------------------------------------------------------------------
 
@@ -331,45 +395,70 @@ fn base_url_override_skips_the_endpoint_chain_entirely() {
 // standing write opt-in
 // ---------------------------------------------------------------------------
 
+// SAFETY: every test in this file is hermetic — sandboxed env, keyring
+// disabled, no network. Nothing here performs, or could perform, any
+// active, change, remediation, or destructive action against any real
+// system. The production Wiz tenant is never contacted. This is a hard
+// rule for the whole feature; see
+// docs/design/read-only-permissions-implementation-plan.md.
+
 #[test]
-fn writes_are_guarded_by_default() {
+fn writes_are_refused_unconditionally_with_no_opt_in() {
+    // D1: mutations refuse unconditionally; there is no opt-in to
+    // report. auth status states the posture plainly.
     let sandbox = Sandbox::new();
     let (_, status) = auth_status(&sandbox, &env_credentials());
     assert_eq!(
         field(&status, "writes"),
-        "guarded (read-only; pass --allow-write per call to override)"
+        "refused (read-only against live tenants; not configurable)"
     );
 }
 
 #[test]
-fn writes_opt_in_from_env_accepts_the_three_affirmative_spellings() {
-    for value in ["1", "true", "yes"] {
-        let sandbox = Sandbox::new();
-        let mut env = env_credentials();
-        env.push(("STAVE_ALLOW_WRITE", value));
-        let (_, status) = auth_status(&sandbox, &env);
-        assert_eq!(
-            field(&status, "writes"),
-            "allowed by standing opt-in (source: STAVE_ALLOW_WRITE)",
-            "STAVE_ALLOW_WRITE={value} should open the standing opt-in"
-        );
-    }
-}
-
-#[test]
-fn writes_stay_guarded_for_a_negative_env_value() {
+fn stale_allow_write_env_does_not_open_any_gate() {
+    // The old STAVE_ALLOW_WRITE env var is gone (D10). Setting it must
+    // not change the refused posture.
     let sandbox = Sandbox::new();
     let mut env = env_credentials();
-    env.push(("STAVE_ALLOW_WRITE", "0"));
+    env.push(("STAVE_ALLOW_WRITE", "1"));
     let (_, status) = auth_status(&sandbox, &env);
-    assert!(
-        field(&status, "writes").starts_with("guarded"),
-        "only affirmative values open the gate: {status}"
+    assert_eq!(
+        field(&status, "writes"),
+        "refused (read-only against live tenants; not configurable)"
     );
 }
 
 #[test]
-fn writes_opt_in_from_config() {
+fn posture_defaults_to_curated() {
+    let sandbox = Sandbox::new();
+    let (_, status) = auth_status(&sandbox, &env_credentials());
+    assert!(
+        field(&status, "posture").starts_with("curated"),
+        "default posture must be curated: {status}"
+    );
+}
+
+#[test]
+fn posture_reports_exploratory_when_configured() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config(
+        r#"
+[default]
+posture = "exploratory"
+"#,
+    );
+    let (_, status) = auth_status(&sandbox, &env_credentials());
+    assert!(
+        field(&status, "posture").starts_with("exploratory"),
+        "{status}"
+    );
+}
+
+#[test]
+fn stale_allow_writes_config_key_is_ignored() {
+    // D10: allow_writes was removed from the typed model. A stale key
+    // must parse harmlessly and change nothing about the refused
+    // posture.
     let sandbox = Sandbox::new();
     sandbox.write_config(
         r#"
@@ -380,25 +469,7 @@ allow_writes = true
     let (_, status) = auth_status(&sandbox, &env_credentials());
     assert_eq!(
         field(&status, "writes"),
-        "allowed by standing opt-in (source: config)"
-    );
-}
-
-#[test]
-fn env_opt_in_wins_over_a_config_refusal() {
-    let sandbox = Sandbox::new();
-    sandbox.write_config(
-        r#"
-[default]
-allow_writes = false
-"#,
-    );
-    let mut env = env_credentials();
-    env.push(("STAVE_ALLOW_WRITE", "1"));
-    let (_, status) = auth_status(&sandbox, &env);
-    assert_eq!(
-        field(&status, "writes"),
-        "allowed by standing opt-in (source: STAVE_ALLOW_WRITE)"
+        "refused (read-only against live tenants; not configurable)"
     );
 }
 
@@ -587,22 +658,23 @@ fn config_set_refuses_secret_keys_and_points_at_the_keyring() {
 }
 
 #[test]
-fn config_set_allow_writes_requires_a_boolean() {
+fn config_set_posture_rejects_unknown_values() {
     let sandbox = Sandbox::new();
 
-    let out = run(sandbox
-        .cmd()
-        .args(["config", "set", "allow_writes", "definitely"]));
+    let out = run(sandbox.cmd().args(["config", "set", "posture", "yolo"]));
     assert!(!out.status.success(), "{out:?}");
     let err = stderr_of(&out);
-    assert!(err.contains("true") && err.contains("false"), "{err}");
+    assert!(
+        err.contains("curated") && err.contains("exploratory"),
+        "{err}"
+    );
 
     let out = run(sandbox
         .cmd()
-        .args(["config", "set", "allow_writes", "true"]));
+        .args(["config", "set", "posture", "exploratory"]));
     assert!(out.status.success(), "{out:?}");
     assert!(
-        sandbox.read_config().contains("allow_writes = true"),
+        sandbox.read_config().contains("posture = \"exploratory\""),
         "{}",
         sandbox.read_config()
     );
@@ -627,7 +699,7 @@ fn config_set_unknown_key_lists_the_known_keys() {
     for key in [
         "client_id",
         "api_url",
-        "allow_writes",
+        "posture",
         "token_url",
         "mcp.url",
         "registry.host",

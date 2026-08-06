@@ -60,9 +60,13 @@ so every consumer inherits them.
   (`STAVE_API_URL`) → config → derived from the token's data-center
   claim. One chain shape, per cli-philosophy.md. Minted tokens are
   cached in the XDG state dir, never in config.
-- **Write-guard:** GraphQL mutations refuse without `--allow-write` /
-  `STAVE_ALLOW_WRITE` / config opt-in. The live tenant is production —
-  keep it that way.
+- **Write-guard:** GraphQL mutations and subscriptions refuse
+  unconditionally — no flag, env, or config lifts it (D1). Ad-hoc
+  `--query` documents run only under the exploratory read posture;
+  curated posture (default) refuses them. The real boundary is a
+  read-only service account (`stave auth plan`); the guard is
+  operational friction, not security. See
+  `docs/design/read-only-posture-and-permissions-report.md`.
 - **Audit trail:** every API call emits a JSONL line under the XDG
   state dir. See `docs/audit-trail-format.md`.
 - **No file deletion:** never delete user files. Overwrite only with explicit intent.

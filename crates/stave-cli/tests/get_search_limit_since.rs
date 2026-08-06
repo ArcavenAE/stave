@@ -506,8 +506,20 @@ fn mcp_call_refuses_a_tool_whose_name_is_not_read_shaped() {
         let err = stderr_of(&out);
         assert!(err.contains("write-guard"), "{err}");
         assert!(err.contains(tool), "the refusal must name the tool: {err}");
-        assert!(err.contains("--allow-write"), "{err}");
-        assert!(err.contains("STAVE_ALLOW_WRITE"), "{err}");
+        // D1/D2: refusal is unconditional and terminal — no override
+        // route is named.
+        assert!(
+            err.contains("read-only against live tenants"),
+            "the refusal must state the posture: {err}"
+        );
+        assert!(
+            !err.contains("--allow-write"),
+            "no override breadcrumb: {err}"
+        );
+        assert!(
+            !err.contains("STAVE_ALLOW_WRITE"),
+            "no override breadcrumb: {err}"
+        );
     }
 }
 

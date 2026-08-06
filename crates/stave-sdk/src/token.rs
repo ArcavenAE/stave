@@ -190,6 +190,49 @@ pub fn dc_claim(access_token: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Decode the granted scopes from a token's payload (no signature
+/// verification — same rationale as [`dc_claim`]: we are reading our
+/// own token for UX, not authenticating anyone).
+///
+/// The claim's exact field name is PROVISIONAL until F1 live
+/// validation (the official docs sit behind tenant auth), so this is a
+/// tolerant reader. Tried in order:
+///
+/// 1. `scope` — OAuth2 convention, space-delimited string (RFC 8693)
+/// 2. `scope` as an array of strings
+/// 3. `scp` — string or array (Azure AD convention)
+/// 4. `permissions` — array (Auth0 RBAC convention)
+///
+/// Returns `(scopes, matched_field)` so callers can report which
+/// claim satisfied the read, or `None` when no claim matched.
+pub fn scopes_claim(access_token: &str) -> Option<(Vec<String>, &'static str)> {
+    let payload_b64 = access_token.split('.').nth(1)?;
+    let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+
+    for field in ["scope", "scp", "permissions"] {
+        let Some(v) = value.get(field) else { continue };
+        let scopes: Vec<String> = match v {
+            serde_json::Value::String(s) => s.split_whitespace().map(|t| t.to_string()).collect(),
+            serde_json::Value::Array(items) => items
+                .iter()
+                .filter_map(|i| i.as_str())
+                .map(|t| t.to_string())
+                .collect(),
+            _ => continue,
+        };
+        if !scopes.is_empty() {
+            let name = match field {
+                "scope" => "scope",
+                "scp" => "scp",
+                _ => "permissions",
+            };
+            return Some((scopes, name));
+        }
+    }
+    None
+}
+
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
@@ -228,6 +271,42 @@ mod tests {
     fn dc_claim_non_jwt_is_none() {
         assert_eq!(dc_claim("not-a-jwt"), None);
         assert_eq!(dc_claim(""), None);
+    }
+
+    #[test]
+    fn scopes_claim_reads_a_space_delimited_scope_string() {
+        let token = fake_jwt(serde_json::json!({"scope": "read:issues read:projects"}));
+        let (scopes, field) = scopes_claim(&token).expect("scopes present");
+        assert_eq!(scopes, vec!["read:issues", "read:projects"]);
+        assert_eq!(field, "scope");
+    }
+
+    #[test]
+    fn scopes_claim_reads_a_scope_array() {
+        let token = fake_jwt(serde_json::json!({"scope": ["read:issues", "read:users"]}));
+        let (scopes, field) = scopes_claim(&token).expect("scopes present");
+        assert_eq!(scopes, vec!["read:issues", "read:users"]);
+        assert_eq!(field, "scope");
+    }
+
+    #[test]
+    fn scopes_claim_falls_back_to_scp_then_permissions() {
+        let token = fake_jwt(serde_json::json!({"scp": ["read:reports"]}));
+        let (scopes, field) = scopes_claim(&token).expect("scp present");
+        assert_eq!(scopes, vec!["read:reports"]);
+        assert_eq!(field, "scp");
+
+        let token = fake_jwt(serde_json::json!({"permissions": ["read:controls"]}));
+        let (scopes, field) = scopes_claim(&token).expect("permissions present");
+        assert_eq!(scopes, vec!["read:controls"]);
+        assert_eq!(field, "permissions");
+    }
+
+    #[test]
+    fn scopes_claim_absent_is_none() {
+        let token = fake_jwt(serde_json::json!({"sub": "svc"}));
+        assert_eq!(scopes_claim(&token), None);
+        assert_eq!(scopes_claim("not-a-jwt"), None);
     }
 
     #[test]

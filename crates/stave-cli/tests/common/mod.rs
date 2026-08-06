@@ -53,6 +53,8 @@ const STAVE_ENV: &[&str] = &[
     "STAVE_CLIENT_ID",
     "STAVE_CLIENT_SECRET",
     "STAVE_CONFIG",
+    "STAVE_KEYRING",
+    "STAVE_SESSION_ID",
     "STAVE_MCP_URL",
     "STAVE_REGISTRY_PASSWORD",
     "STAVE_TOKEN_CACHE_DIR",
@@ -111,13 +113,27 @@ impl Sandbox {
         c.env_remove("RUST_LOG");
         c.env("STAVE_CONFIG", self.config_path())
             .env("STAVE_AUDIT_DIR", self.audit_dir())
-            .env("STAVE_TOKEN_CACHE_DIR", self.token_cache_dir());
+            .env("STAVE_TOKEN_CACHE_DIR", self.token_cache_dir())
+            // Hermetic by construction: the sandbox must never open the
+            // user's real keychain. A resident `stave` item plus a
+            // rebuilt (re-signed) test binary makes macOS raise an
+            // access-control prompt that hangs a headless run.
+            .env("STAVE_KEYRING", "off");
         c
     }
 
     /// Seed the config file. Body is TOML written verbatim.
     pub fn write_config(&self, body: &str) {
         std::fs::write(self.config_path(), body).expect("write sandbox config");
+    }
+
+    /// Seed the exploratory read posture (D11), the config state under
+    /// which ad-hoc `--query` documents are permitted. Curated
+    /// operations do not need this. All tests exercising ad-hoc reads
+    /// against a LOCAL mock server set this; no real tenant is ever
+    /// contacted (MANDATORY SAFETY RULES).
+    pub fn write_exploratory_config(&self) {
+        self.write_config("[default]\nposture = \"exploratory\"\n");
     }
 
     pub fn read_config(&self) -> String {

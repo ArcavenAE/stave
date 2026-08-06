@@ -31,7 +31,6 @@ pub const CLIENT_ID_ENV: &str = "STAVE_CLIENT_ID";
 pub const CLIENT_SECRET_ENV: &str = "STAVE_CLIENT_SECRET";
 pub const API_URL_ENV: &str = "STAVE_API_URL";
 pub const TOKEN_URL_ENV: &str = "STAVE_TOKEN_URL";
-pub const ALLOW_WRITE_ENV: &str = "STAVE_ALLOW_WRITE";
 pub const CONFIG_ENV: &str = "STAVE_CONFIG";
 pub const REGISTRY_PASSWORD_ENV: &str = "STAVE_REGISTRY_PASSWORD";
 pub const KEYRING_SERVICE: &str = "stave";
@@ -65,8 +64,10 @@ impl SecretSource {
 
 /// Source of a chain-resolved non-secret value. Drops `Keyring`
 /// (non-secrets don't live there) and adds `Flag` for explicit
-/// per-call overrides plus `Derived` for values recovered from the
-/// minted token (the endpoint's data-center claim).
+/// per-call overrides, `Derived` for values recovered from the
+/// minted token (the endpoint's data-center claim), and `Default`
+/// for built-in constants at the bottom of a chain (the token
+/// endpoint).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamSource {
@@ -74,6 +75,7 @@ pub enum ParamSource {
     Env,
     Config,
     Derived,
+    Default,
 }
 
 impl ParamSource {
@@ -83,6 +85,7 @@ impl ParamSource {
             ParamSource::Env => "env",
             ParamSource::Config => "config",
             ParamSource::Derived => "derived",
+            ParamSource::Default => "default",
         }
     }
 }
@@ -157,13 +160,14 @@ pub fn resolve_api_url(flag: Option<&str>) -> Result<Option<ResolvedParam>> {
     resolve_param(flag, API_URL_ENV, |c| c.default.api_url.clone())
 }
 
-/// Resolve the OAuth token endpoint: env → config → built-in default.
-pub fn resolve_token_url() -> Result<ResolvedParam> {
+/// Resolve the OAuth token endpoint: flag → env → config → built-in
+/// default.
+pub fn resolve_token_url(flag: Option<&str>) -> Result<ResolvedParam> {
     Ok(
-        resolve_param(None, TOKEN_URL_ENV, |c| c.auth.token_url.clone())?.unwrap_or(
+        resolve_param(flag, TOKEN_URL_ENV, |c| c.auth.token_url.clone())?.unwrap_or(
             ResolvedParam {
                 value: DEFAULT_TOKEN_URL.to_string(),
-                source: ParamSource::Config,
+                source: ParamSource::Default,
             },
         ),
     )
@@ -176,19 +180,40 @@ pub fn api_url_from_dc(dc: &str) -> String {
     format!("https://api.{dc}.app.wiz.io/graphql")
 }
 
-/// True when write operations are allowed without a per-call
-/// `--allow-write`. Walks env (`STAVE_ALLOW_WRITE`, any of
-/// `1`/`true`/`yes`) → config (`[default] allow_writes = true`).
-pub fn writes_allowed_by_default() -> Result<bool> {
-    if let Ok(v) = std::env::var(ALLOW_WRITE_ENV) {
-        let v = v.trim().to_ascii_lowercase();
-        if v == "1" || v == "true" || v == "yes" {
-            return Ok(true);
+/// Read posture (D11): under `Curated` (the default) ad-hoc GraphQL
+/// documents are refused; `Exploratory` permits ad-hoc READ documents.
+/// Mutations refuse unconditionally in both postures. The posture is a
+/// persistent, operator-set config value — there is deliberately no
+/// per-call or per-shell override.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Posture {
+    Curated,
+    Exploratory,
+}
+
+impl Posture {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Posture::Curated => "curated",
+            Posture::Exploratory => "exploratory",
         }
     }
-    Ok(read_config()?
-        .map(|c| c.default.allow_writes.unwrap_or(false))
-        .unwrap_or(false))
+}
+
+/// Resolve the read posture from config. Absent means `Curated`. An
+/// unrecognized value is fatal: a misspelled posture must not silently
+/// widen or narrow the surface.
+pub fn resolve_posture() -> Result<Posture> {
+    match read_config()?.and_then(|c| c.default.posture) {
+        None => Ok(Posture::Curated),
+        Some(v) => match v.trim() {
+            "curated" => Ok(Posture::Curated),
+            "exploratory" => Ok(Posture::Exploratory),
+            other => Err(StaveError::Auth(format!(
+                "config `posture` must be `curated` or `exploratory`, got {other:?}"
+            ))),
+        },
+    }
 }
 
 /// Resolve the container-registry password: env → keyring → config.
@@ -253,7 +278,21 @@ fn resolve_param(
     Ok(None)
 }
 
+/// `STAVE_KEYRING=off` disables the platform keyring entirely: reads
+/// resolve as absent, deletes are no-ops, and writes error. For test
+/// harnesses (a hermetic sandbox must never open the user's real
+/// keychain — a macOS access-control prompt hangs a headless run) and
+/// for environments without a keyring daemon.
+pub const KEYRING_ENV: &str = "STAVE_KEYRING";
+
+fn keyring_disabled() -> bool {
+    std::env::var(KEYRING_ENV).is_ok_and(|v| v.trim().eq_ignore_ascii_case("off"))
+}
+
 fn read_keyring_entry(user: &str) -> Option<String> {
+    if keyring_disabled() {
+        return None;
+    }
     let entry = keyring::Entry::new(KEYRING_SERVICE, user).ok()?;
     entry.get_password().ok()
 }
@@ -293,6 +332,12 @@ fn store_keyring_entry(user: &str, secret: &str) -> Result<()> {
     if secret.is_empty() {
         return Err(StaveError::Auth("value must not be empty".into()));
     }
+    if keyring_disabled() {
+        return Err(StaveError::Auth(format!(
+            "the platform keyring is disabled ({KEYRING_ENV}=off); unset it to store \
+             secrets in the keyring, or provide the value via env or config instead"
+        )));
+    }
     let entry = keyring::Entry::new(KEYRING_SERVICE, user)
         .map_err(|e| StaveError::Auth(format!("keyring open: {e}")))?;
     entry
@@ -302,6 +347,9 @@ fn store_keyring_entry(user: &str, secret: &str) -> Result<()> {
 }
 
 fn delete_keyring_entry(user: &str) -> Result<bool> {
+    if keyring_disabled() {
+        return Ok(false);
+    }
     let entry = keyring::Entry::new(KEYRING_SERVICE, user)
         .map_err(|e| StaveError::Auth(format!("keyring open: {e}")))?;
     match entry.delete_credential() {
@@ -370,16 +418,17 @@ pub struct DefaultConfig {
     /// Tenant GraphQL endpoint — `https://api.<region>.app.wiz.io/graphql`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_url: Option<String>,
-    /// Standing opt-in for write (mutation) operations. Defaults to
-    /// false — stave is read-only against the tenant unless the
-    /// caller passes `--allow-write` or sets this.
+    /// Read posture (D11): `curated` (default) or `exploratory`.
+    /// Under `curated`, ad-hoc GraphQL documents (`stave api --query`)
+    /// are refused; `exploratory` permits ad-hoc READ documents.
+    /// Mutations refuse unconditionally in both postures.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub allow_writes: Option<bool>,
+    pub posture: Option<String>,
 }
 
 impl DefaultConfig {
     fn is_empty(&self) -> bool {
-        self.api_url.is_none() && self.allow_writes.is_none()
+        self.api_url.is_none() && self.posture.is_none()
     }
 }
 
@@ -442,6 +491,14 @@ pub fn read_config() -> Result<Option<Config>> {
     };
     let parsed: Config = toml::from_str(&body)
         .map_err(|e| StaveError::Auth(format!("parse config {}: {e}", path.display())))?;
+    // D10: `allow_writes` was removed from the typed model. A stale key
+    // parses harmlessly (#[serde(default)]) but is obsolete and ignored.
+    if body.contains("allow_writes") {
+        tracing::warn!(
+            "config contains obsolete `allow_writes`; the key is ignored — stave \
+             is read-only against live tenants (docs/design/read-only-posture-and-permissions-report.md)"
+        );
+    }
     Ok(Some(parsed))
 }
 
@@ -502,12 +559,15 @@ token_url = "https://auth.example.test/oauth/token"
 
 [default]
 api_url = "https://api.example.test/graphql"
+posture = "exploratory"
 allow_writes = false
 
 [registry]
 host = "registry.example.test"
 username = "repo-user"
 "#;
+        // `allow_writes` above is the D10 stale-key case: it has no
+        // typed field and must parse harmlessly via #[serde(default)].
         let cfg: Config = toml::from_str(body).expect("parse");
         assert_eq!(cfg.auth.client_id.as_deref(), Some("svc-abc"));
         assert_eq!(
@@ -518,7 +578,7 @@ username = "repo-user"
             cfg.default.api_url.as_deref(),
             Some("https://api.example.test/graphql")
         );
-        assert_eq!(cfg.default.allow_writes, Some(false));
+        assert_eq!(cfg.default.posture.as_deref(), Some("exploratory"));
         assert_eq!(cfg.registry.username.as_deref(), Some("repo-user"));
     }
 

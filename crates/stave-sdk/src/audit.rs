@@ -1,8 +1,9 @@
 //! JSONL audit trail emission.
 //!
-//! Schema lives in `docs/audit-trail-format.md`. v0.1 implements
-//! schema_version=1 with the documented fields and a header-only
-//! redaction policy (see `redact.rs`).
+//! Schema lives in `docs/audit-trail-format.md`. Current emission is
+//! schema_version=3 (adds `result: "refused"`, `session_id`, `posture`,
+//! and `document_sha256`) with a header-only redaction policy (see
+//! `redact.rs`).
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -17,6 +18,13 @@ use uuid::Uuid;
 use crate::auth::{ParamSource, SecretSource};
 use crate::error::Result;
 use crate::redact;
+
+/// Durable session identity for the audit trail (v3, D6). Supplied by
+/// the invoking agent environment as an opaque string; recorded in
+/// every emission's invocation block when present. `trace_id` groups
+/// one logical invocation; this groups an operator session across
+/// invocations, which is what the per-session refusal detector needs.
+pub const SESSION_ID_ENV: &str = "STAVE_SESSION_ID";
 
 /// Returns the configured audit directory, or `None` if the trail is
 /// globally disabled (`STAVE_AUDIT=off`).
@@ -103,6 +111,22 @@ pub struct Span {
     /// callers should populate this for every chain-tracked param,
     /// `Flag` included.
     pub path_params_source: BTreeMap<String, ParamSource>,
+
+    /// Durable session identity (v3): opaque string supplied by the
+    /// invoking agent environment via `STAVE_SESSION_ID`. `trace_id`
+    /// groups one logical invocation; `session_id` groups an operator
+    /// session across invocations — the key the per-session refusal
+    /// detector (D6) counts on. Absent when the env var is unset.
+    pub session_id: Option<String>,
+
+    /// Active read posture (v3, D11): recorded for ad-hoc document
+    /// calls (`curated` / `exploratory`). `None` for curated-operation
+    /// calls, where posture is not consulted.
+    pub posture: Option<String>,
+
+    /// sha256 of an ad-hoc GraphQL document (v3, D11). `None` for
+    /// curated operations, whose documents are pinned by the registry.
+    pub document_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +176,9 @@ impl Span {
             verb_phase: None,
             synthesis_keys: Vec::new(),
             path_params_source: BTreeMap::new(),
+            session_id: std::env::var(SESSION_ID_ENV).ok().filter(|s| !s.is_empty()),
+            posture: None,
+            document_sha256: None,
         }
     }
 
@@ -219,6 +246,30 @@ impl Span {
         }
     }
 
+    /// Emit a `result: "refused"` line (v3, D6). Guard refusals never
+    /// reach the wire, so there is no HTTP response block; the line
+    /// carries the operation identity, the classification, and the
+    /// standard invocation header (including `session_id` when the
+    /// invoking environment supplied one). The byte-stable refusal
+    /// MESSAGE carries no identity — this line is where correlation
+    /// lives instead.
+    pub fn finish_refused(self, operation: &str, op_type: &str, reason: &'static str) {
+        let ts_end = Utc::now();
+        let duration_ms = (ts_end - self.started_at).num_milliseconds().max(0) as u64;
+
+        let mut record = self.base_record(duration_ms);
+        record["result"] = json!("refused");
+        record["refusal"] = json!({
+            "operation": operation,
+            "op_type": op_type,
+            "reason": reason,
+        });
+
+        if let Err(e) = write_line(&record) {
+            tracing::warn!(error = %e, "audit emission failed");
+        }
+    }
+
     /// Build a verb-shape JSONL record and write it. Used by stream
     /// transforms (`filter`, `enrich`, `emit`) that have no API call.
     /// `extra` carries verb-specific fields — `predicate_text`,
@@ -244,7 +295,7 @@ impl Span {
     /// touching the filesystem.
     pub(crate) fn base_record(&self, duration_ms: u64) -> Value {
         let mut record = json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "trace_id": self.trace_id.to_string(),
             "span_id": self.span_id.to_string(),
             "parent_span_id": self.parent_span_id.map(|u| u.to_string()),
@@ -259,8 +310,15 @@ impl Span {
                 "tty": self.tty,
                 "auth_source": self.auth_source.map(|s| s.as_str()),
                 "api_url_source": self.api_url_source.map(|s| s.as_str()),
+                "session_id": self.session_id,
             },
         });
+        if let Some(p) = &self.posture {
+            record["posture"] = json!(p);
+        }
+        if let Some(h) = &self.document_sha256 {
+            record["document_sha256"] = json!(h);
+        }
         if let Some(p) = self.verb_phase {
             record["verb_phase"] = json!(p);
         }
@@ -304,6 +362,16 @@ fn hostname() -> String {
                 .map(|s| s.trim().to_string())
         })
         .unwrap_or_default()
+}
+
+/// sha256 of an ad-hoc GraphQL document (v3, D11). Recorded in the
+/// audit line so miners can group ad-hoc usage by document identity
+/// without storing the document text (which can carry tenant data).
+pub fn document_sha256(document: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(document.as_bytes());
+    format!("sha256:{}", hex_encode(&hasher.finalize()))
 }
 
 /// Compute a sha256 over a "shape view" of a JSON value (keys and types,

@@ -5,13 +5,15 @@
 //! * **Endpoint chain** — the tenant GraphQL endpoint resolves through
 //!   flag → env → config → *derived from the minted token's
 //!   data-center claim* (see `auth::resolve_api_url` + `token::dc_claim`).
-//! * **Write-guard** — stave is read-only by default. Any mutation
-//!   (curated `OpType::Mutation`, or an ad-hoc document containing a
-//!   mutation/subscription) errors with [`StaveError::WriteGuard`]
-//!   unless the caller opted in (`CallOptions::allow_write`, driven by
-//!   `--allow-write`, `STAVE_ALLOW_WRITE`, or
-//!   `[default] allow_writes = true`). The live tenant is production;
-//!   the guard makes mutation a deliberate act.
+//! * **Write-guard** — stave is read-only against live tenants. Any
+//!   mutation (curated `OpType::Mutation`, or an ad-hoc document
+//!   containing a mutation/subscription) errors with
+//!   [`StaveError::WriteGuard`] UNCONDITIONALLY — there is no flag,
+//!   env var, or config opt-in (D1, docs/design/
+//!   read-only-posture-and-permissions-report.md). The only tenant is
+//!   production and the guard has never been commissioned against a
+//!   live mutation; the real boundary is the credential's read-only
+//!   scopes. Refusals emit a `result: "refused"` audit line (D6).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -20,7 +22,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::audit::{AuditOp, Outcome, Outcomes, Span, shape_hash};
+use crate::audit::{AuditOp, Outcome, Outcomes, Span, document_sha256, shape_hash};
 use crate::auth::{self, ParamSource, SecretSource};
 use crate::error::{Result, StaveError};
 use crate::ops::{self, OpType};
@@ -82,11 +84,11 @@ pub struct CallOptions {
     /// `operation`, keeping the mining signal uniform with stave's
     /// siblings). The Client adds `_api_url` itself.
     pub path_params_source: BTreeMap<String, ParamSource>,
-    /// Opt-in for mutating operations. When false (the default), the
-    /// write-guard rejects the call before any request is sent. See
-    /// `auth::writes_allowed_by_default` for the standing opt-in chain
-    /// the CLI resolves before setting this.
-    pub allow_write: bool,
+    /// Active read posture (D11), recorded in the audit line for
+    /// ad-hoc document calls. Presentation-layer callers set this;
+    /// it does not gate anything at the SDK layer (the CLI enforces
+    /// the curated/exploratory posture before calling).
+    pub posture: Option<String>,
 }
 
 impl Client {
@@ -115,7 +117,7 @@ impl Client {
         let client_id = auth::resolve_client_id(None)?.ok_or_else(auth::credentials_chain_error)?;
         let client_secret =
             auth::resolve_client_secret()?.ok_or_else(auth::credentials_chain_error)?;
-        let token_url = auth::resolve_token_url()?;
+        let token_url = auth::resolve_token_url(None)?;
 
         let mint_http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -214,12 +216,13 @@ impl Client {
     /// Execute a curated operation by registry name. `variables` is
     /// the GraphQL variables object (`{"first": 50, "after": "..."}`).
     ///
-    /// Mutations are rejected with [`StaveError::WriteGuard`] unless
-    /// `opts.allow_write` is set. Returns the response's `data` value.
+    /// Mutations are rejected with [`StaveError::WriteGuard`]
+    /// unconditionally (D1). Returns the response's `data` value.
     pub async fn call_op(&self, name: &str, variables: &Value, opts: CallOptions) -> Result<Value> {
         let op = ops::find(name)?;
 
-        if op.op_type == OpType::Mutation && !opts.allow_write {
+        if op.op_type == OpType::Mutation {
+            self.emit_refused(&opts, op.name, op.op_type.as_str(), "mutation", None);
             return Err(StaveError::WriteGuard {
                 operation: op.name.to_string(),
                 op_type: op.op_type.as_str().to_string(),
@@ -257,16 +260,58 @@ impl Client {
         } else {
             OpType::Query
         };
+        let doc_hash = document_sha256(document);
 
-        if meta.is_mutating && !opts.allow_write {
+        if meta.is_mutating {
+            self.emit_refused(
+                &opts,
+                &name,
+                op_type.as_str(),
+                "mutation",
+                Some(doc_hash.clone()),
+            );
             return Err(StaveError::WriteGuard {
                 operation: name,
                 op_type: op_type.as_str().to_string(),
             });
         }
 
-        self.execute(&name, op_type, None, document, variables, opts)
-            .await
+        self.execute_with_hash(
+            &name,
+            op_type,
+            None,
+            document,
+            variables,
+            opts,
+            Some(doc_hash),
+        )
+        .await
+    }
+
+    /// Emit the D6 `result: "refused"` audit line for a guard trip.
+    /// Refusals never reach the wire; this line is where correlation
+    /// identity lives (the refusal MESSAGE is byte-stable, per D2).
+    fn emit_refused(
+        &self,
+        opts: &CallOptions,
+        operation: &str,
+        op_type: &str,
+        reason: &'static str,
+        document_sha256: Option<String>,
+    ) {
+        if opts.no_audit {
+            return;
+        }
+        let trace_id = opts.trace_id.unwrap_or_else(Uuid::now_v7);
+        let mut span = Span::start(trace_id);
+        span.auth_source = self.auth_source;
+        span.api_url_source = self.api_url_source;
+        span.posture = opts.posture.clone();
+        span.document_sha256 = document_sha256;
+        if let Some(phase) = opts.verb_phase {
+            span = span.with_verb_phase(phase);
+        }
+        span.finish_refused(operation, op_type, reason);
     }
 
     async fn execute(
@@ -278,10 +323,29 @@ impl Client {
         variables: &Value,
         opts: CallOptions,
     ) -> Result<Value> {
+        self.execute_with_hash(
+            op_name, op_type, root_field, document, variables, opts, None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_with_hash(
+        &self,
+        op_name: &str,
+        op_type: OpType,
+        root_field: Option<&str>,
+        document: &str,
+        variables: &Value,
+        opts: CallOptions,
+        document_sha256: Option<String>,
+    ) -> Result<Value> {
         let trace_id = opts.trace_id.unwrap_or_else(Uuid::now_v7);
         let mut span = Span::start(trace_id);
         span.auth_source = self.auth_source;
         span.api_url_source = self.api_url_source;
+        span.posture = opts.posture.clone();
+        span.document_sha256 = document_sha256;
         if let Some(phase) = opts.verb_phase {
             span = span.with_verb_phase(phase);
         }

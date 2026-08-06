@@ -127,17 +127,35 @@ The audit trail records `auth_source`, `api_url_source`, and
 `path_params_source._api_url` so the mining surface separates
 constant defaults from per-call intent.
 
-### B4: Write-Guard — Mutations Refuse by Default, Ad-Hoc Documents Included
+### B4: Read-Only Posture — Mutations Refuse Unconditionally, Layered Permission Model
 
-Any GraphQL mutation errors with a repair-friendly `WriteGuard`
-message unless allowed by: `--allow-write` (per call) →
-`STAVE_ALLOW_WRITE` env → `[default] allow_writes = true` config.
-Ad-hoc documents (`stave api --query`) are parsed before anything
-reaches the wire: a mutation or subscription anywhere in the document
-trips the guard, and an unparseable document is refused outright. The
-same posture gates MCP `tools/call` for tools whose names are not
-read-shaped (conservative allowlist of read prefixes; unknown shapes
-are write-gated). Enforced in the SDK so every consumer inherits it.
+stave refuses every GraphQL mutation and subscription with a terminal,
+byte-stable `WriteGuard` message: no `--allow-write`, no env var, no
+config opt-in lifts it (the override surface was removed — a gate that
+can never be commissioned against a live mutation is scenery, and an
+override breadcrumb reads as an instruction to a high-temperature
+agent). Ad-hoc documents (`stave api --query`) run only under the
+exploratory read posture (`config set posture exploratory`); the
+default curated posture refuses them. Unparseable documents are refused
+outright; non-read MCP tools are refused the same way. Enforced in the
+SDK so every consumer inherits it.
+
+Around that boundary sit three more layers, none of them a security
+control (the server's scope enforcement is): a registry that declares
+`required_scopes` per operation (`check-ops` fails a verb that omits
+them); the permission verbs `ops permissions` / `auth scopes` /
+`auth can-i` / `auth plan [--check]` that report and provision
+least-privilege credentials offline from the token's own scope claim;
+and refusals audited as a first-class `result: "refused"` outcome so a
+run of reformulated attempts in one session is visible. The real
+boundary is a read-only service account; the client-side guard is
+honest friction on top of it, documented as untested against a live
+mutation.
+
+Full design and the mandatory testing-safety rules:
+`docs/design/read-only-posture-and-permissions-report.md` and
+`docs/design/read-only-permissions-implementation-plan.md`. Scope names
+are provisional until F1.
 
 ### B5: Registry Credential Custody
 

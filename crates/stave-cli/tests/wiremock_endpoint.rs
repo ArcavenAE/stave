@@ -7,8 +7,14 @@
 //!   * `list` pages a connection: the second request carries the first
 //!     response's `endCursor` as `variables.after`.
 //!   * the write-guard refuses a mutating document before anything is
-//!     sent (asserted with `expect(0)`, which wiremock verifies on drop),
-//!     and `--allow-write` deliberately opens the gate.
+//!     sent (asserted with `expect(0)`, which wiremock verifies on drop);
+//!     mutations refuse unconditionally, with no override (D1).
+//!
+//! SAFETY: every request here targets a LOCAL wiremock server on
+//! 127.0.0.1, never a real Wiz tenant. No test performs, or could
+//! perform, any active/change/remediation/destructive action against
+//! any real system. See
+//! docs/design/read-only-permissions-implementation-plan.md.
 //!   * the OAuth mint runs against the mocked token endpoint with
 //!     `grant_type=client_credentials` and `audience=wiz-api`, caches the
 //!     result, and the audit line records where the credential and the
@@ -378,9 +384,12 @@ const MUTATION_DOCUMENT: &str = r#"mutation ResolveOneIssue($id: ID!) {
 
 #[tokio::test]
 async fn adhoc_mutation_is_refused_before_any_request_is_sent() {
+    // Exploratory posture is set so the document reaches the write-guard
+    // classifier (curated posture would refuse the ad-hoc document one
+    // step earlier). A mutation must STILL refuse. expect(0): the guard
+    // refuses locally, so wiremock — a local mock, never the tenant —
+    // sees nothing.
     let server = MockServer::start().await;
-    // expect(0): the guard parses the document and refuses locally, so
-    // wiremock must see nothing. Verified when the server drops.
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
@@ -389,6 +398,7 @@ async fn adhoc_mutation_is_refused_before_any_request_is_sent() {
         .await;
 
     let sandbox = Sandbox::new();
+    sandbox.write_exploratory_config();
     let out = run_with_stdin(
         sandbox
             .cmd()
@@ -400,117 +410,146 @@ async fn adhoc_mutation_is_refused_before_any_request_is_sent() {
 
     assert!(!out.status.success(), "the guard must refuse: {out:?}");
     let err = stderr_of(&out);
+    // D2: terminal, byte-stable wall. It names the posture and stops.
     assert!(err.contains("write-guard"), "{err}");
     assert!(
-        err.contains("ResolveOneIssue"),
-        "the refusal must name the operation it parsed: {err}"
+        err.contains("read-only against live tenants"),
+        "the refusal must state the posture: {err}"
     );
-    assert!(err.contains("--allow-write"), "{err}");
-    assert!(err.contains("STAVE_ALLOW_WRITE"), "{err}");
+    // D2: the refusal must NOT name any override route — there is none.
     assert!(
-        err.contains("stave config set allow_writes true"),
-        "all three opt-in routes must be named: {err}"
+        !err.contains("--allow-write"),
+        "no override breadcrumb: {err}"
+    );
+    assert!(
+        !err.contains("STAVE_ALLOW_WRITE"),
+        "no override breadcrumb: {err}"
+    );
+    assert!(
+        !err.contains("allow_writes"),
+        "no override breadcrumb: {err}"
+    );
+
+    // D6: the refusal emits a first-class audit line (schema v3), never
+    // a response block, carrying the refusal detail for correlation.
+    let refused: Vec<_> = sandbox
+        .audit_lines()
+        .into_iter()
+        .filter(|l| l["result"] == "refused")
+        .collect();
+    assert_eq!(refused.len(), 1, "one refused line: {refused:?}");
+    assert_eq!(refused[0]["schema_version"], 3);
+    assert_eq!(refused[0]["refusal"]["op_type"], "mutation");
+    assert_eq!(refused[0]["refusal"]["operation"], "ResolveOneIssue");
+    assert!(
+        refused[0]["response"].is_null(),
+        "a refused call never has a response block: {:?}",
+        refused[0]
     );
 }
 
 #[tokio::test]
-async fn adhoc_mutation_fires_with_allow_write_and_audits_as_a_mutation() {
+async fn a_refused_line_records_the_session_id_when_the_env_supplies_one() {
+    // D6: STAVE_SESSION_ID threads into the refused audit line so a
+    // per-session refusal detector can group reformulated attempts.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(header("authorization", "Bearer example-access-token"))
-        .and(body_string_contains("updateIssue"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"updateIssue": {"issue": {"id": "issue_01", "status": "RESOLVED"}}}
-        })))
-        .expect(1)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+        .expect(0)
         .mount(&server)
         .await;
 
     let sandbox = Sandbox::new();
-    let out = run_with_stdin(
-        sandbox
-            .cmd()
-            .args([
-                "api",
-                "--query",
-                "-",
-                "--var",
-                "id=issue_01",
-                "--allow-write",
-            ])
-            .env("STAVE_ACCESS_TOKEN", "example-access-token")
-            .env("STAVE_BASE_URL", graphql_url(&server)),
-        MUTATION_DOCUMENT,
-    );
-
-    assert!(
-        out.status.success(),
-        "--allow-write must open the gate: {}",
-        stderr_of(&out)
-    );
-    assert!(stdout_of(&out).contains("RESOLVED"), "{}", stdout_of(&out));
-
-    let api = sandbox.api_audit_lines();
-    assert_eq!(api.len(), 1, "a deliberate write still audits: {api:?}");
-    assert_eq!(api[0]["operation"]["method"], "mutation");
-    assert_eq!(api[0]["operation"]["id"], "ResolveOneIssue");
-    assert_eq!(api[0]["verb_phase"], "api");
-}
-
-#[tokio::test]
-async fn adhoc_mutation_fires_with_the_standing_env_opt_in() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/graphql"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"updateIssue": {"issue": {"id": "issue_01", "status": "RESOLVED"}}}
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let sandbox = Sandbox::new();
+    sandbox.write_exploratory_config();
     let out = run_with_stdin(
         sandbox
             .cmd()
             .args(["api", "--query", "-", "--var", "id=issue_01"])
             .env("STAVE_ACCESS_TOKEN", "example-access-token")
             .env("STAVE_BASE_URL", graphql_url(&server))
-            .env("STAVE_ALLOW_WRITE", "1"),
+            .env("STAVE_SESSION_ID", "agent-session-77"),
         MUTATION_DOCUMENT,
     );
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!out.status.success());
+    let refused: Vec<_> = sandbox
+        .audit_lines()
+        .into_iter()
+        .filter(|l| l["result"] == "refused")
+        .collect();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0]["invocation"]["session_id"], "agent-session-77");
 }
 
 #[tokio::test]
-async fn adhoc_mutation_fires_with_the_standing_config_opt_in() {
+async fn adhoc_read_is_refused_under_the_curated_posture() {
+    // D11: the default curated posture refuses ad-hoc --query documents
+    // (even reads) before anything reaches the wire.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {}})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let sandbox = Sandbox::new();
+    let out = run_with_stdin(
+        sandbox
+            .cmd()
+            .args(["api", "--query", "-"])
+            .env("STAVE_ACCESS_TOKEN", "example-access-token")
+            .env("STAVE_BASE_URL", graphql_url(&server)),
+        "query ReadIssues { issuesV2 { nodes { id } } }",
+    );
+    assert!(
+        !out.status.success(),
+        "curated posture must refuse: {out:?}"
+    );
+    let err = stderr_of(&out);
+    assert!(err.contains("curated"), "{err}");
+    assert!(
+        err.contains("stave config set posture exploratory"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn adhoc_read_is_allowed_under_the_exploratory_posture() {
+    // D11: under exploratory posture, an ad-hoc READ document runs
+    // (against a LOCAL mock — never the tenant), and the audit line
+    // records the posture and the document hash.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"updateIssue": {"issue": {"id": "issue_01", "status": "RESOLVED"}}}
+            "data": {"issuesV2": {"nodes": []}}
         })))
         .expect(1)
         .mount(&server)
         .await;
 
     let sandbox = Sandbox::new();
-    sandbox.write_config(
-        r#"
-[default]
-allow_writes = true
-"#,
-    );
+    sandbox.write_exploratory_config();
     let out = run_with_stdin(
         sandbox
             .cmd()
-            .args(["api", "--query", "-", "--var", "id=issue_01"])
+            .args(["api", "--query", "-"])
             .env("STAVE_ACCESS_TOKEN", "example-access-token")
             .env("STAVE_BASE_URL", graphql_url(&server)),
-        MUTATION_DOCUMENT,
+        "query ReadIssues { issuesV2 { nodes { id } } }",
     );
     assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let api = sandbox.api_audit_lines();
+    assert_eq!(api.len(), 1, "an ad-hoc read audits: {api:?}");
+    assert_eq!(api[0]["posture"], "exploratory");
+    assert!(
+        api[0]["document_sha256"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("sha256:")),
+        "the ad-hoc document hash must be recorded: {api:?}"
+    );
 }
 
 #[tokio::test]
@@ -524,6 +563,7 @@ async fn a_query_hiding_a_mutation_in_the_same_document_is_still_refused() {
         .await;
 
     let sandbox = Sandbox::new();
+    sandbox.write_exploratory_config();
     let document = "query ReadIssues { issuesV2 { nodes { id } } }\n\
                     mutation Sneaky { deleteReport(id: \"rep_01\") { id } }";
     let out = run_with_stdin(
@@ -553,6 +593,7 @@ async fn an_unparseable_document_never_reaches_the_wire() {
         .await;
 
     let sandbox = Sandbox::new();
+    sandbox.write_exploratory_config();
     let out = run_with_stdin(
         sandbox
             .cmd()
@@ -595,7 +636,7 @@ async fn audit_line_records_the_v2_shape_for_a_curated_query() {
     let api = sandbox.api_audit_lines();
     assert_eq!(api.len(), 1, "{api:?}");
     let line = &api[0];
-    assert_eq!(line["schema_version"], 2);
+    assert_eq!(line["schema_version"], 3);
     assert_eq!(line["verb_phase"], "list");
     assert_eq!(line["synthesis_keys"][0], "id");
     assert_eq!(line["operation"]["id"], "list_issues");
