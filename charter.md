@@ -190,14 +190,15 @@ want (`issue-triage`, `vuln-exposure`, `posture-report`)? Deferred
 until real usage accumulates — the explicit purpose of shipping the
 audit trail first.
 
-### F5: Distribution
+### F5: Distribution [largely resolved]
 
-CI workflows (ci/alpha/release, harden-runner, gated signing) ported
-from bloomctl and renamed. Signing gates on `vars.SIGNING_ENABLED`;
-enabling requires adding stave to the org-level signing/notary/tap
-secret allowlists (same 7 secrets the siblings use) and the `release`
-environment. First alpha publishes `Formula/stave.rb` to
-`ArcavenAE/homebrew-tap`.
+Signed distribution is live as of 2026-08-05: the 7 org secrets are
+granted, `SIGNING_ENABLED=true`, and alpha run 31056265168 went
+all-green through Sign & Notarize, provenance attestation, and the
+tap update. Verified end to end: `brew install ArcavenAE/tap/stave`
+installs a Developer ID-signed, notarized binary reporting its channel
+tag in `--version`. Remaining: the stable channel (`v*` tag →
+release.yml) is untested until the first stable release is cut.
 
 ---
 
