@@ -39,43 +39,34 @@ attempted against the tenant.
   per the GraphQL grammar. Without this, `check-ops` could not parse
   the schema at all.
 
-## The load-bearing finding: scopes are an opaque bitmask
+## Scope-qualification did not manifest as expected — needs more study
 
-The design assumed the token would carry granted scopes as readable
-strings (`scope` / `scp` / `permissions`). It does not. The Wiz
-service-account token carries **`encodedScopes`** — a base64 bitmask
-against an internal ordering stave does not have. There is no readable
-current-identity scope query in the schema (`serviceAccountScopes`
-appears only on a mutation *payload*, i.e. the echo when an SA is
-created).
+With the service account used during development, the scope-reading
+verbs (`auth scopes`, `auth can-i`, `auth plan --check`) did not
+function as designed. The token did not expose granted scopes as the
+readable claim the design assumed; the observed carrier was
+`encodedScopes`, which did not decode to a readable scope list through
+the paths tried. The root cause and the correct remedy are not settled
+and require more study (against this and other service accounts).
 
-Consequence for the D5 verbs:
+Interim behavior (ratified: keep as-is): the verbs **refuse to answer**
+rather than emit a verdict they cannot support. `auth scopes` reports
+the scopes as non-enumerable; `auth can-i` and `auth plan --check` exit
+nonzero with "cannot determine" instead of a possibly-false
+"not allowed." `ops permissions` and `auth plan` (the GRANT / DO NOT
+GRANT provisioning checklist) are unaffected — they are static registry
+metadata and do not read the token.
 
-- `auth scopes` reports the scopes are opaque and non-enumerable — it
-  does NOT claim "no scopes."
-- `auth can-i` and `auth plan --check` **refuse to answer** rather than
-  emit a false verdict. This is the paramount honesty property: with an
-  opaque bitmask, a naive reader would have reported every scope as
-  "missing" and every operation as "not allowed," which is worse than
-  useless — it is confidently wrong.
-- `ops permissions` and `auth plan` (GRANT / DO NOT GRANT provisioning
-  checklist) are unaffected — they are static registry metadata and do
-  not need the token. This is the higher-value half of the feature, and
-  it stands.
+`token_scopes` returns `Readable | Opaque | Absent`; the CLI handles the
+non-readable case honestly on every scope-dependent path. Tests cover
+all three.
 
-`token_scopes` now returns `Readable | Opaque | Absent`; the CLI handles
-`Opaque` honestly on every scope-dependent path. Tests cover all three.
+## Still open
 
-## Still open (design decision for the operator)
-
-Enumerating/checking granted scopes for a Wiz tenant would require
-either Wiz's `encodedScopes` bit-ordering table (not published) or a
-readable-scopes API query (none found for the current identity). Until
-one exists, client-side `can-i`/`--check` cannot function against Wiz
-tokens. Options, none urgent: (a) leave them honest-refusing as now;
-(b) drop them for Wiz and lean entirely on `auth plan` provisioning;
-(c) revisit if Wiz exposes a readable-scopes query. Recorded, not
-decided.
+Whether scope qualification can work against Wiz at all is unresolved
+and needs more study — the encodedScopes format, whether a readable
+scope source exists elsewhere, and how the grant vocabulary is actually
+issued. Decision on the verbs: option (a), left honest-refusing.
 
 ## Provisional markers
 

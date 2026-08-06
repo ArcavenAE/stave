@@ -183,16 +183,15 @@ exist → `nativeType`), `CloudAccount.status` (deprecated →
 `lastScannedAt`/`resourceCount`), and a sync-spec SDL bug (empty types
 emitted invalid `{}`).
 
-Load-bearing finding: the Wiz token carries scopes as an opaque
-`encodedScopes` bitmask, not readable strings. `auth can-i` and
-`auth plan --check` therefore refuse to answer rather than emit a false
-verdict; `ops permissions` and `auth plan` (provisioning) are
-unaffected. See finding-001. Grant-vocabulary enumeration stays open
-(no readable-scopes query exists for the current identity).
+Open finding: with the service account used during development, scope
+qualification did not manifest as expected — the token did not expose
+readable granted scopes, so `auth can-i` and `auth plan --check` refuse
+to answer rather than emit a false verdict (option (a), ratified).
+`ops permissions` and `auth plan` provisioning are unaffected. Root
+cause and remedy require more study. See finding-001.
 
-Remaining: MCP transport (F3), and the composite-verb question (F4).
-`SCOPE_METADATA_PROVISIONAL` stays true until the grant vocabulary is
-confirmed by another route.
+Remaining: scope-qualification study, MCP transport (F3), and the
+composite-verb question (F4). `SCOPE_METADATA_PROVISIONAL` stays true.
 
 ### F2: Schema Introspection, get-by-id, and Server-Side Filters
 

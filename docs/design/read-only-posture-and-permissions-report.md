@@ -258,19 +258,15 @@ problem, tracked separately, not laundered through this posture.
 
 ## F1 outcome (validated 2026-08-06, read-only; see _kos/findings/finding-001)
 
-- **The JWT scope claim is `encodedScopes` — an opaque base64 bitmask,
-  not readable strings.** The `scope`/`scp`/`permissions` assumption was
-  wrong. `token_scopes` now returns `Readable | Opaque | Absent`;
-  `auth can-i` and `auth plan --check` refuse to answer on `Opaque`
-  rather than emit a false verdict. `ops permissions` and `auth plan`
-  provisioning are unaffected.
-- **No readable current-identity scope query exists** in the schema, so
-  the grant vocabulary a tenant issues cannot be enumerated client-side.
-  Whether `delete:`-prefixed scopes exist is still unknown for the same
-  reason. `SCOPE_METADATA_PROVISIONAL` stays `true`.
-- **`read:all` implication** (D3 provisional rule) is unexercised against
-  a real token because grants are opaque; the rule stands as written for
-  any future readable-token tenant.
+- **Scope qualification did not manifest as expected and needs more
+  study.** With the development service account, the token did not
+  expose readable granted scopes (observed carrier `encodedScopes`,
+  which did not decode to a scope list through the paths tried). Root
+  cause and remedy are unresolved. `token_scopes` returns
+  `Readable | Opaque | Absent`; `auth can-i` and `auth plan --check`
+  refuse to answer rather than emit a false verdict (option (a),
+  ratified). `ops permissions` and `auth plan` provisioning are
+  unaffected. `SCOPE_METADATA_PROVISIONAL` stays `true`.
 - Confirmed working: token mint (`audience=wiz-api`), `dc`-claim
   endpoint derivation, schema introspection, the read pipeline, and 11
   of 12 curated documents (two corrected, see finding-001).
