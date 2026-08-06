@@ -172,15 +172,27 @@ ID and is therefore tenant-identifying (tenant-data-hygiene rule).
 
 *Actively open. Expected to resolve through design work or probes.*
 
-### F1: Live Validation
+### F1: Live Validation [largely resolved 2026-08-06]
 
-Everything vendor-shaped is provisional until validated against a real
-tenant: the curated field selections (B2), the kind-table metadata,
-the token-mint request shape (audience value), the data-center claim
-derivation, and the MCP transport (F3). Gated on a Wiz service
-account with read scopes. First smoke: `auth login` → `auth status` →
-`list issue --limit 5` → `api list_projects` → the filter/emit
-pipeline on real payloads.
+Validated against the production tenant, read-only (finding-001).
+Confirmed: the token mint (audience `wiz-api`), the data-center claim
+derivation, schema introspection (10,060 types vendored + sha256
+pinned), the read pipeline end to end (`list project`), and 11 of 12
+curated documents. Corrected: `CloudResource.cloudPlatform` (does not
+exist → `nativeType`), `CloudAccount.status` (deprecated →
+`lastScannedAt`/`resourceCount`), and a sync-spec SDL bug (empty types
+emitted invalid `{}`).
+
+Load-bearing finding: the Wiz token carries scopes as an opaque
+`encodedScopes` bitmask, not readable strings. `auth can-i` and
+`auth plan --check` therefore refuse to answer rather than emit a false
+verdict; `ops permissions` and `auth plan` (provisioning) are
+unaffected. See finding-001. Grant-vocabulary enumeration stays open
+(no readable-scopes query exists for the current identity).
+
+Remaining: MCP transport (F3), and the composite-verb question (F4).
+`SCOPE_METADATA_PROVISIONAL` stays true until the grant vocabulary is
+confirmed by another route.
 
 ### F2: Schema Introspection, get-by-id, and Server-Side Filters
 

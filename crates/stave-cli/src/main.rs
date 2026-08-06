@@ -24,7 +24,7 @@ use serde_json::{Map, Value, json};
 use stave_sdk::stream::{Record, SourceRef, read_stream, write_record};
 use stave_sdk::{
     ACCESS_TOKEN_ENV, CallOptions, Client, KindSpec, SCOPE_METADATA_PROVISIONAL, audit, auth, cel,
-    enrich, kind_spec, kinds, mcp, ops, scopes_claim, token,
+    enrich, kind_spec, kinds, mcp, ops, token, token_scopes,
 };
 use uuid::Uuid;
 
@@ -1346,13 +1346,24 @@ fn egress_str(e: stave_sdk::Egress) -> &'static str {
     }
 }
 
-/// The scopes the token at hand carries, and which claim field named
-/// them. `None` when no token is available or no scope claim matched.
-/// Never mints — reads env or the cache only (`stave auth scopes`).
-fn resolved_scopes() -> Option<(Vec<String>, &'static str)> {
-    let token = available_access_token()?;
-    scopes_claim(&token)
+/// The scope information the token at hand carries. Never mints —
+/// reads env or the cache only (`stave auth scopes`). `Absent` when no
+/// token is available at all.
+fn resolved_token_scopes() -> stave_sdk::TokenScopes {
+    match available_access_token() {
+        Some(token) => token_scopes(&token),
+        None => stave_sdk::TokenScopes::Absent,
+    }
 }
+
+/// The message printed when a real Wiz token is present but its scopes
+/// are opaque (F1: `encodedScopes` bitmask). Enumeration and
+/// grant-checking are impossible client-side; provisioning still works
+/// statically via `auth plan`.
+const OPAQUE_SCOPES_NOTE: &str = "this tenant's token encodes scopes as an opaque bitmask (encodedScopes), \
+     so stave cannot enumerate or check granted scopes from the token. Use \
+     `stave auth plan` for the least-privilege provisioning checklist, and set \
+     the service account's scopes in the Wiz portal.";
 
 /// `read:all` is treated as granting any `read:*` scope. Provisional
 /// rule (D3) until F1 confirms Wiz's scope-implication semantics.
@@ -1369,8 +1380,8 @@ fn scope_granted(required: &str, granted: &[String]) -> bool {
 fn auth_scopes() -> anyhow::Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    match resolved_scopes() {
-        Some((scopes, field)) => {
+    match resolved_token_scopes() {
+        stave_sdk::TokenScopes::Readable { scopes, field } => {
             let record = json!({
                 "scopes": scopes,
                 "claim_field": field,
@@ -1379,10 +1390,19 @@ fn auth_scopes() -> anyhow::Result<()> {
             writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
             Ok(())
         }
-        None => Err(anyhow!(
+        stave_sdk::TokenScopes::Opaque { field } => {
+            let record = json!({
+                "scopes": Value::Null,
+                "claim_field": field,
+                "enumerable": false,
+                "note": OPAQUE_SCOPES_NOTE,
+            });
+            writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
+            Ok(())
+        }
+        stave_sdk::TokenScopes::Absent => Err(anyhow!(
             "no token scopes available. Provide a token first: `stave auth login` (mints \
-             one), or set {}. If a token is present but carries no recognized scope claim, \
-             the claim field is provisional until live validation.",
+             one), or set {}.",
             ACCESS_TOKEN_ENV
         )),
     }
@@ -1390,12 +1410,23 @@ fn auth_scopes() -> anyhow::Result<()> {
 
 fn auth_can_i(operation: &str) -> anyhow::Result<()> {
     let op = ops::find(operation).map_err(|e| anyhow!("{e}"))?;
-    let (granted, _field) = resolved_scopes().ok_or_else(|| {
-        anyhow!(
-            "no token scopes available to check against. Run `stave auth login` or set {}.",
-            ACCESS_TOKEN_ENV
-        )
-    })?;
+    let granted = match resolved_token_scopes() {
+        stave_sdk::TokenScopes::Readable { scopes, .. } => scopes,
+        // Never report a false "no": if scopes are opaque we cannot
+        // decide grant membership, so say exactly that.
+        stave_sdk::TokenScopes::Opaque { .. } => {
+            return Err(anyhow!(
+                "cannot determine whether '{}' is permitted: {OPAQUE_SCOPES_NOTE}",
+                op.name
+            ));
+        }
+        stave_sdk::TokenScopes::Absent => {
+            return Err(anyhow!(
+                "no token scopes available to check against. Run `stave auth login` or set {}.",
+                ACCESS_TOKEN_ENV
+            ));
+        }
+    };
     let missing: Vec<&str> = op
         .required_scopes
         .iter()
@@ -1504,12 +1535,24 @@ fn auth_plan(args: AuthPlanArgs) -> anyhow::Result<()> {
 /// requirement, reporting MISSING (unusable) vs EXCESS
 /// (over-privileged) separately. Exits nonzero on any drift.
 fn auth_plan_check(required: &[String]) -> anyhow::Result<()> {
-    let (granted, _field) = resolved_scopes().ok_or_else(|| {
-        anyhow!(
-            "no token scopes available to check against. Run `stave auth login` or set {}.",
-            ACCESS_TOKEN_ENV
-        )
-    })?;
+    let granted = match resolved_token_scopes() {
+        stave_sdk::TokenScopes::Readable { scopes, .. } => scopes,
+        // Cannot compare against an opaque bitmask without reporting a
+        // false drift. Say so, and exit nonzero (the check did not pass).
+        stave_sdk::TokenScopes::Opaque { .. } => {
+            return Err(anyhow!(
+                "cannot check the credential against the requirement: {OPAQUE_SCOPES_NOTE} \
+                 The GRANT set to provision is: {}",
+                required.join(", ")
+            ));
+        }
+        stave_sdk::TokenScopes::Absent => {
+            return Err(anyhow!(
+                "no token scopes available to check against. Run `stave auth login` or set {}.",
+                ACCESS_TOKEN_ENV
+            ));
+        }
+    };
     let missing: Vec<String> = required
         .iter()
         .filter(|s| !scope_granted(s, &granted))

@@ -16,10 +16,17 @@ mod common;
 use common::{Sandbox, fake_jwt, run, stderr_of, stdout_of};
 use serde_json::Value;
 
-/// A token carrying an explicit set of scopes, injected via
+/// A token carrying an explicit set of readable scopes, injected via
 /// `STAVE_ACCESS_TOKEN` so nothing mints and no network is touched.
 fn token_with_scopes(scopes: &[&str]) -> String {
     fake_jwt(serde_json::json!({ "scope": scopes.join(" "), "sub": "svc-example" }))
+}
+
+/// A token shaped like a real Wiz service-account token (F1,
+/// 2026-08-06): scopes live in an opaque `encodedScopes` bitmask, not
+/// readable strings.
+fn token_with_opaque_scopes() -> String {
+    fake_jwt(serde_json::json!({ "encodedScopes": "AAAAAAAAAhwC", "dc": "example1", "sub": "svc" }))
 }
 
 fn jsonl(out: &str) -> Vec<Value> {
@@ -139,6 +146,61 @@ fn can_i_no_and_exits_nonzero_when_the_scope_is_missing() {
     let record: Value = serde_json::from_str(stdout_of(&out).trim()).expect("one JSON object");
     assert_eq!(record["allowed"], false);
     assert_eq!(record["missing_scopes"][0], "read:issues");
+}
+
+#[test]
+fn auth_scopes_reports_opaque_wiz_scopes_without_claiming_none() {
+    // F1: a real Wiz token carries encodedScopes (opaque). auth scopes
+    // must report the limitation, not pretend the scopes are absent.
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["auth", "scopes"])
+        .env("STAVE_ACCESS_TOKEN", token_with_opaque_scopes()));
+    assert!(
+        out.status.success(),
+        "opaque is not an error: {}",
+        stderr_of(&out)
+    );
+    let record: Value = serde_json::from_str(stdout_of(&out).trim()).expect("one JSON object");
+    assert_eq!(record["enumerable"], false);
+    assert_eq!(record["claim_field"], "encodedScopes");
+}
+
+#[test]
+fn can_i_refuses_to_guess_when_scopes_are_opaque() {
+    // The critical honesty property: with an opaque bitmask, can-i must
+    // NOT report a false "not allowed" — it must say it cannot decide.
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["auth", "can-i", "list_issues"])
+        .env("STAVE_ACCESS_TOKEN", token_with_opaque_scopes()));
+    assert!(!out.status.success(), "cannot-decide is not a pass");
+    let err = stderr_of(&out);
+    assert!(err.contains("cannot determine"), "{err}");
+    assert!(err.contains("opaque"), "{err}");
+    // It must not have printed a false allowed:false verdict.
+    assert!(
+        !stdout_of(&out).contains("\"allowed\""),
+        "must not emit a verdict it cannot support: {}",
+        stdout_of(&out)
+    );
+}
+
+#[test]
+fn plan_check_refuses_to_compare_against_opaque_scopes() {
+    let sandbox = Sandbox::new();
+    let out = run(sandbox
+        .cmd()
+        .args(["auth", "plan", "--op", "list_issues", "--check"])
+        .env("STAVE_ACCESS_TOKEN", token_with_opaque_scopes()));
+    assert!(!out.status.success(), "cannot-check is not a pass");
+    assert!(
+        stderr_of(&out).contains("cannot check"),
+        "{}",
+        stderr_of(&out)
+    );
 }
 
 #[test]

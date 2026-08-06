@@ -256,18 +256,28 @@ leakage into audit lines (`docs/audit-trail-format.md` already warns that
 variables and cursors carry tenant data). That is a distinct audit-privacy
 problem, tracked separately, not laundered through this posture.
 
-## Provisional pending F1 (live validation)
+## F1 outcome (validated 2026-08-06, read-only; see _kos/findings/finding-001)
 
-- The JWT scope claim's exact field name (scopes-in-token corroborated by
-  integration vendors via RegScale's `wizScope`; field name unverified).
-- The canonical scope vocabulary and exact names (official docs are behind
-  tenant auth; current list is assembled from integration-vendor docs).
-- Scope-implication rules (e.g. whether a `read:all` bundle subsumes the
-  enumerated scopes for `can-i`/`--check` math).
-- Whether `delete:`-prefixed scopes exist in the vendor grammar.
+- **The JWT scope claim is `encodedScopes` — an opaque base64 bitmask,
+  not readable strings.** The `scope`/`scp`/`permissions` assumption was
+  wrong. `token_scopes` now returns `Readable | Opaque | Absent`;
+  `auth can-i` and `auth plan --check` refuse to answer on `Opaque`
+  rather than emit a false verdict. `ops permissions` and `auth plan`
+  provisioning are unaffected.
+- **No readable current-identity scope query exists** in the schema, so
+  the grant vocabulary a tenant issues cannot be enumerated client-side.
+  Whether `delete:`-prefixed scopes exist is still unknown for the same
+  reason. `SCOPE_METADATA_PROVISIONAL` stays `true`.
+- **`read:all` implication** (D3 provisional rule) is unexercised against
+  a real token because grants are opaque; the rule stands as written for
+  any future readable-token tenant.
+- Confirmed working: token mint (`audience=wiz-api`), `dc`-claim
+  endpoint derivation, schema introspection, the read pipeline, and 11
+  of 12 curated documents (two corrected, see finding-001).
 
-Until F1: build the plumbing, but `auth plan` / `auth scopes` / `can-i` mark
-their output provisional and are not presented as authoritative.
+Design decision left open for the operator: whether to keep
+`can-i`/`--check` honest-refusing, drop them for Wiz, or revisit if a
+readable-scopes route appears.
 
 ## Decided vs. buildable
 

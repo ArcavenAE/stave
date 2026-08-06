@@ -1,11 +1,15 @@
-# Provisional until live introspection (see charter F1).
+# Validated against the vendored schema (F1, 2026-08-06):
+# CloudResource has no `cloudPlatform`; `nativeType` is the native
+# cloud type string, `subscriptionName`/`subscriptionExternalId` carry
+# the account.
 query ListCloudResources($first: Int, $after: String) {
   cloudResources(first: $first, after: $after) {
     nodes {
       id
       name
       type
-      cloudPlatform
+      nativeType
+      subscriptionName
       subscriptionExternalId
     }
     pageInfo {

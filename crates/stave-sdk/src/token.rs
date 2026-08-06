@@ -190,25 +190,45 @@ pub fn dc_claim(access_token: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// The scope information recoverable from a token's payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TokenScopes {
+    /// Scopes are enumerable as readable strings (standard OAuth/OIDC
+    /// tokens: `scope`, `scp`, or `permissions`). `field` names which
+    /// claim matched.
+    Readable {
+        scopes: Vec<String>,
+        field: &'static str,
+    },
+    /// Scopes are present but ENCODED opaquely and cannot be enumerated
+    /// client-side. Wiz service-account tokens carry `encodedScopes`, a
+    /// base64 bitmask against an internal ordering stave does not have,
+    /// so grant membership cannot be decided from the token alone.
+    /// Confirmed at F1 (2026-08-06). `field` names the opaque claim.
+    Opaque { field: &'static str },
+    /// No recognized scope claim at all.
+    Absent,
+}
+
 /// Decode the granted scopes from a token's payload (no signature
 /// verification — same rationale as [`dc_claim`]: we are reading our
 /// own token for UX, not authenticating anyone).
 ///
-/// The claim's exact field name is PROVISIONAL until F1 live
-/// validation (the official docs sit behind tenant auth), so this is a
-/// tolerant reader. Tried in order:
-///
-/// 1. `scope` — OAuth2 convention, space-delimited string (RFC 8693)
-/// 2. `scope` as an array of strings
-/// 3. `scp` — string or array (Azure AD convention)
-/// 4. `permissions` — array (Auth0 RBAC convention)
-///
-/// Returns `(scopes, matched_field)` so callers can report which
-/// claim satisfied the read, or `None` when no claim matched.
-pub fn scopes_claim(access_token: &str) -> Option<(Vec<String>, &'static str)> {
-    let payload_b64 = access_token.split('.').nth(1)?;
-    let payload = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+/// Readable forms, tried in order: `scope` (space-delimited string or
+/// array, OAuth2/RFC 8693), `scp` (Azure convention), `permissions`
+/// (Auth0 RBAC). If none match, an opaque `encodedScopes` claim (Wiz)
+/// is reported as [`TokenScopes::Opaque`] so callers can be honest
+/// about the limitation rather than reporting a false "no scopes."
+pub fn token_scopes(access_token: &str) -> TokenScopes {
+    let Some(payload_b64) = access_token.split('.').nth(1) else {
+        return TokenScopes::Absent;
+    };
+    let Ok(payload) = URL_SAFE_NO_PAD.decode(payload_b64) else {
+        return TokenScopes::Absent;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return TokenScopes::Absent;
+    };
 
     for field in ["scope", "scp", "permissions"] {
         let Some(v) = value.get(field) else { continue };
@@ -227,10 +247,20 @@ pub fn scopes_claim(access_token: &str) -> Option<(Vec<String>, &'static str)> {
                 "scp" => "scp",
                 _ => "permissions",
             };
-            return Some((scopes, name));
+            return TokenScopes::Readable {
+                scopes,
+                field: name,
+            };
         }
     }
-    None
+
+    // Wiz service-account tokens: scopes live in an opaque bitmask.
+    if value.get("encodedScopes").is_some() {
+        return TokenScopes::Opaque {
+            field: "encodedScopes",
+        };
+    }
+    TokenScopes::Absent
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -274,39 +304,59 @@ mod tests {
     }
 
     #[test]
-    fn scopes_claim_reads_a_space_delimited_scope_string() {
+    fn token_scopes_reads_a_space_delimited_scope_string() {
         let token = fake_jwt(serde_json::json!({"scope": "read:issues read:projects"}));
-        let (scopes, field) = scopes_claim(&token).expect("scopes present");
-        assert_eq!(scopes, vec!["read:issues", "read:projects"]);
-        assert_eq!(field, "scope");
+        assert_eq!(
+            token_scopes(&token),
+            TokenScopes::Readable {
+                scopes: vec!["read:issues".into(), "read:projects".into()],
+                field: "scope",
+            }
+        );
     }
 
     #[test]
-    fn scopes_claim_reads_a_scope_array() {
+    fn token_scopes_reads_a_scope_array_and_falls_back_to_scp_then_permissions() {
         let token = fake_jwt(serde_json::json!({"scope": ["read:issues", "read:users"]}));
-        let (scopes, field) = scopes_claim(&token).expect("scopes present");
-        assert_eq!(scopes, vec!["read:issues", "read:users"]);
-        assert_eq!(field, "scope");
-    }
+        assert!(matches!(
+            token_scopes(&token),
+            TokenScopes::Readable { field: "scope", .. }
+        ));
 
-    #[test]
-    fn scopes_claim_falls_back_to_scp_then_permissions() {
         let token = fake_jwt(serde_json::json!({"scp": ["read:reports"]}));
-        let (scopes, field) = scopes_claim(&token).expect("scp present");
-        assert_eq!(scopes, vec!["read:reports"]);
-        assert_eq!(field, "scp");
+        assert!(matches!(
+            token_scopes(&token),
+            TokenScopes::Readable { field: "scp", .. }
+        ));
 
         let token = fake_jwt(serde_json::json!({"permissions": ["read:controls"]}));
-        let (scopes, field) = scopes_claim(&token).expect("permissions present");
-        assert_eq!(scopes, vec!["read:controls"]);
-        assert_eq!(field, "permissions");
+        assert!(matches!(
+            token_scopes(&token),
+            TokenScopes::Readable {
+                field: "permissions",
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn scopes_claim_absent_is_none() {
+    fn token_scopes_reports_wiz_encoded_scopes_as_opaque() {
+        // The real Wiz service-account token shape (F1, 2026-08-06):
+        // scopes live in an opaque bitmask, not readable strings.
+        let token = fake_jwt(serde_json::json!({"encodedScopes": "AAAAAAAAAhwC", "dc": "us1"}));
+        assert_eq!(
+            token_scopes(&token),
+            TokenScopes::Opaque {
+                field: "encodedScopes"
+            }
+        );
+    }
+
+    #[test]
+    fn token_scopes_absent_when_no_claim() {
         let token = fake_jwt(serde_json::json!({"sub": "svc"}));
-        assert_eq!(scopes_claim(&token), None);
-        assert_eq!(scopes_claim("not-a-jwt"), None);
+        assert_eq!(token_scopes(&token), TokenScopes::Absent);
+        assert_eq!(token_scopes("not-a-jwt"), TokenScopes::Absent);
     }
 
     #[test]

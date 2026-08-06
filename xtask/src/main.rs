@@ -365,15 +365,17 @@ mod introspection {
             .ok_or_else(|| anyhow!("type without a name"))?;
         match ty.kind.as_str() {
             "SCALAR" => Ok(format!("scalar {name}\n")),
-            "OBJECT" => Ok(format!(
-                "type {name}{} {{\n{}}}\n",
-                implements_clause(ty),
-                field_lines(ty, name)?
+            "OBJECT" => Ok(sdl_block(
+                "type",
+                name,
+                &implements_clause(ty),
+                &field_lines(ty, name)?,
             )),
-            "INTERFACE" => Ok(format!(
-                "interface {name}{} {{\n{}}}\n",
-                implements_clause(ty),
-                field_lines(ty, name)?
+            "INTERFACE" => Ok(sdl_block(
+                "interface",
+                name,
+                &implements_clause(ty),
+                &field_lines(ty, name)?,
             )),
             "UNION" => {
                 let mut members: Vec<&str> = ty
@@ -402,7 +404,7 @@ mod introspection {
                         )
                     })
                     .collect();
-                Ok(format!("enum {name} {{\n{body}}}\n"))
+                Ok(sdl_block("enum", name, "", &body))
             }
             "INPUT_OBJECT" => {
                 let mut fields: Vec<&InputValue> = ty.input_fields.iter().flatten().collect();
@@ -414,9 +416,23 @@ mod introspection {
                         input_value(f).with_context(|| format!("input {name}.{}", f.name))?
                     ));
                 }
-                Ok(format!("input {name} {{\n{body}}}\n"))
+                Ok(sdl_block("input", name, "", &body))
             }
             other => Err(anyhow!("type {name} has unknown kind {other}")),
+        }
+    }
+
+    /// Render a type definition, omitting the `{ }` block when the body
+    /// is empty. GraphQL's grammar makes the fields/values block
+    /// optional, and an empty `{}` is a parse error (a fields block
+    /// requires at least one member), so a bodyless definition is the
+    /// only valid SDL for a type introspection reports with no members.
+    /// Wiz's schema has a couple (e.g. empty input objects).
+    fn sdl_block(keyword: &str, name: &str, suffix: &str, body: &str) -> String {
+        if body.is_empty() {
+            format!("{keyword} {name}{suffix}\n")
+        } else {
+            format!("{keyword} {name}{suffix} {{\n{body}}}\n")
         }
     }
 

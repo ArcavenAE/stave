@@ -33,7 +33,7 @@ pub use ops::{
     CostHint, DocumentMeta, Effects, Egress, OpType, OperationDoc, Reversibility,
     SCOPE_METADATA_PROVISIONAL, Sensitivity, SideEffects, classify_document,
 };
-pub use token::scopes_claim;
+pub use token::{TokenScopes, token_scopes};
 
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -1,4 +1,7 @@
-# Provisional until live introspection (see charter F1).
+# Validated against the vendored schema (F1, 2026-08-06):
+# `status` is deprecated (deployments/system-health supersede it) and
+# was dropped; `lastScannedAt` + `resourceCount` are stable inventory
+# fields.
 query ListCloudAccounts($first: Int, $after: String) {
   cloudAccounts(first: $first, after: $after) {
     nodes {
@@ -6,7 +9,8 @@ query ListCloudAccounts($first: Int, $after: String) {
       name
       externalId
       cloudProvider
-      status
+      lastScannedAt
+      resourceCount
     }
     pageInfo {
       hasNextPage
