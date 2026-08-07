@@ -31,9 +31,12 @@
 # that field is not on the allowlist, not because it looked dangerous.
 
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+# Resolve the pattern module from this script's own location so the
+# scrubber works when invoked from any directory. Scrub-by-construction
+# in a run harness means being called from somewhere else.
+SCRUB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/leak-patterns.sh
-source scripts/leak-patterns.sh
+source "$SCRUB_DIR/leak-patterns.sh"
 
 MODE=auto
 CATALOG=0
@@ -158,29 +161,109 @@ text_layer() {
   '
 }
 
-looks_like_stave_jsonl() {
-  # First non-blank line parses as a JSON object carrying `_kind`.
-  local first
-  first="$(grep -m1 . "$1" || true)"
-  [[ -n "$first" ]] && printf '%s' "$first" | jq -e 'type == "object" and has("_kind")' >/dev/null 2>&1
+# Classify the input so dispatch can FAIL CLOSED.
+#
+# The original version asked one question, "is the first line a JSON
+# object with _kind", and silently fell through to the text tier for
+# everything else. Measured 2026-08-06: that meant the field layer
+# engaged on exactly one of the four shapes stave actually emits, and a
+# person's name passed through `emit --format json` and
+# `emit --format md` untouched, exit 0, no warning. Silent fall-through
+# on the shape that carries the most identifying data is the worst
+# possible default for a leak control.
+classify_input() {
+  local f="$1" first
+  first="$(grep -m1 . "$f" || true)"
+  if [[ -z "$first" ]]; then
+    printf 'empty\n'; return
+  fi
+  # A rendered markdown table: pipes and a separator row.
+  if printf '%s' "$first" | grep -qE '^\|.*\|$'; then
+    printf 'md-table\n'; return
+  fi
+  # Pretty-printed JSON array (emit --format json).
+  if printf '%s' "$first" | grep -qE '^[[:space:]]*\[[[:space:]]*$'; then
+    if jq -e 'type == "array" and (length == 0 or (.[0] | type == "object" and has("_kind")))' \
+        < "$f" >/dev/null 2>&1; then
+      printf 'json-array\n'; return
+    fi
+    printf 'json-unknown\n'; return
+  fi
+  # Newline-delimited stave records.
+  if printf '%s' "$first" | jq -e 'type == "object" and has("_kind")' >/dev/null 2>&1; then
+    printf 'jsonl\n'; return
+  fi
+  # A JSON document with no _kind: `stave api` raw GraphQL output.
+  if printf '%s' "$first" | grep -qE '^[[:space:]]*\{' ; then
+    printf 'json-unknown\n'; return
+  fi
+  printf 'text\n'
+}
+
+refuse() {
+  cat >&2 <<EOF
+scrub.sh: refusing to process $1.
+
+$2
+
+Refusing rather than falling through to the pattern tier, because the
+pattern tier cannot see the class that matters. A resource name, a
+bucket, a project slug, or a person's name has no shape to match; those
+are caught by the field allowlist or not at all.
+EOF
+  exit 3
 }
 
 run_scrub() {
-  local tmp
+  local tmp shape
   tmp="$(mktemp)"
   trap 'rm -f "$tmp"' RETURN
   cat > "$tmp"
-  local use_field=0
-  case "$MODE" in
-    jsonl) use_field=1 ;;
-    text) use_field=0 ;;
-    auto) looks_like_stave_jsonl "$tmp" && use_field=1 ;;
-  esac
-  if [[ "$use_field" -eq 1 ]]; then
-    field_layer < "$tmp" | text_layer
-  else
+
+  # An explicit --text is the operator accepting the pattern tier alone.
+  if [[ "$MODE" == "text" ]]; then
     text_layer < "$tmp"
+    return
   fi
+
+  shape="$(classify_input "$tmp")"
+
+  if [[ "$MODE" == "jsonl" && "$shape" != "jsonl" && "$shape" != "json-array" ]]; then
+    refuse "input that is not a stave record stream (--jsonl was given, shape looks like: $shape)" \
+      "Re-run without --jsonl to see the shape-specific guidance."
+  fi
+
+  case "$shape" in
+    empty)
+      : ;;
+    jsonl)
+      field_layer < "$tmp" | text_layer ;;
+    json-array)
+      # emit --format json. Explode to records, field-scrub, rebuild.
+      jq -c '.[]' < "$tmp" | field_layer | jq -s '.' | text_layer ;;
+    md-table)
+      refuse "a rendered markdown table" \
+"A table has already lost its field names, so the allowlist cannot be
+applied to it. The id column is a raw record id.
+
+Scrub BEFORE emit, not after:
+  stave list issue --limit 50 | scripts/scrub.sh | stave emit --format md" ;;
+    json-unknown)
+      refuse "a JSON document with no \`_kind\`" \
+"This is the shape \`stave api --query\` produces. The field allowlist is
+keyed to the twelve curated kinds and cannot classify an arbitrary
+GraphQL response, so it would pass every field through.
+
+Either project the response into the record stream first, or accept the
+pattern tier alone with an explicit --text and read the result knowing
+names and slugs survive it." ;;
+    text)
+      refuse "input of unrecognised shape" \
+"If this is prose, an error message, or a log line, pass --text to accept
+the pattern tier alone. That tier catches emails, GUIDs, ARNs, OCIDs,
+IPs, account ids, and the local literals. It does NOT catch names,
+bucket names, or project slugs." ;;
+  esac
 }
 
 # ---------------------------------------------------------------------
@@ -188,9 +271,11 @@ run_scrub() {
 # ---------------------------------------------------------------------
 selftest() {
   local fail=0
-  check() { # name, input, must-not-contain
-    local name="$1" input="$2" forbidden="$3" out
+  check() { # name, input, must-not-contain [, mode]
+    local name="$1" input="$2" forbidden="$3" mode="${4:-auto}" out
+    local saved="$MODE"; MODE="$mode"
     out="$(printf '%s\n' "$input" | run_scrub)"
+    MODE="$saved"
     if printf '%s' "$out" | grep -qF -- "$forbidden"; then
       printf 'FAIL %-28s leaked: %s\n' "$name" "$forbidden" >&2
       printf '     output: %s\n' "$out" >&2
@@ -223,34 +308,75 @@ selftest() {
     'secret-value'
   check "text: email" \
     'contact svc@example-corp.com now' \
-    'svc@example-corp.com'
+    'svc@example-corp.com' \
+    text
   check "text: OCID" \
     'ocid1.compartment.oc1..aaaaaaaaexamplecompartmentid00000' \
-    'ocid1.compartment.oc1..aaaaaaaaexamplecompartmentid00000'
+    'ocid1.compartment.oc1..aaaaaaaaexamplecompartmentid00000' \
+    text
   check "text: ARN" \
     'arn:aws:iam::123456789012:role/ExampleRole' \
-    'arn:aws:iam::123456789012:role/ExampleRole'
+    'arn:aws:iam::123456789012:role/ExampleRole' \
+    text
   check "text: GCP resource path" \
     'projects/example-project-dev/serviceAccounts/x' \
-    'projects/example-project-dev/serviceAccounts/x'
+    'projects/example-project-dev/serviceAccounts/x' \
+    text
   check "text: azure subscription path" \
     '/subscriptions/00000000-1111-2222-3333-444444444444/resourceGroups/rg1' \
-    '/subscriptions/00000000-1111-2222-3333-444444444444/resourceGroups/rg1'
+    '/subscriptions/00000000-1111-2222-3333-444444444444/resourceGroups/rg1' \
+    text
   check "text: bare account id" \
     'account 123456789012 scanned' \
-    '123456789012'
+    '123456789012' \
+    text
   check "text: GUID" \
     'id 00000000-1111-2222-3333-444444444444 seen' \
-    '00000000-1111-2222-3333-444444444444'
+    '00000000-1111-2222-3333-444444444444' \
+    text
   check "text: bearer token" \
     'Authorization: Bearer abcdefghij0123456789xyz' \
-    'abcdefghij0123456789xyz'
+    'abcdefghij0123456789xyz' \
+    text
   check "text: region hostname" \
     'POST https://api.us999.app.wiz.io/graphql' \
-    'api.us999.app.wiz.io'
+    'api.us999.app.wiz.io' \
+    text
   check "text: IP address" \
     'peer 203.0.113.42 refused' \
-    '203.0.113.42'
+    '203.0.113.42' \
+    text
+
+  # Shape dispatch. Measured 2026-08-06: the field layer engaged on one
+  # of four shapes and fell through silently on the rest. These cases
+  # exist so that cannot come back quietly.
+  check "shape: json-array field-scrubbed" \
+    '[
+  {"_kind":"issue","severity":"HIGH","entitySnapshot":{"name":"Jane Q Example"}}
+]' \
+    'Jane Q Example'
+  check "text: lowercase bearer" \
+    'header: bearer abcdefghij0123456789xyz' \
+    'abcdefghij0123456789xyz' \
+    text
+
+  refuses() { # name, input
+    local name="$1" input="$2" rc=0
+    printf '%s\n' "$input" | run_scrub >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" -eq 3 ]]; then
+      printf 'ok   %-28s (refused)\n' "$name"
+    else
+      printf 'FAIL %-28s should have refused, exit %s\n' "$name" "$rc" >&2
+      fail=1
+    fi
+  }
+  refuses "shape: md-table refuses" '| _kind | id | severity |
+|---|---|---|
+| issue | prod-db-primary | HIGH |'
+  refuses "shape: api output refuses" '{
+  "issuesV2": {"nodes": [{"entitySnapshot": {"name": "prod-host"}}]}
+}'
+  refuses "shape: bare prose refuses" 'the resource prod-db-primary is exposed'
 
   # Positive control: safe fields must SURVIVE, or the scrubber is
   # useless rather than merely safe.
