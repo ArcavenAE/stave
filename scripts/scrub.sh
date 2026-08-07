@@ -72,6 +72,17 @@ done
 # `subscriptionExternalId` are redacted individually. Allowing the
 # container is what makes "open criticals by cloud platform" possible
 # without naming a single resource.
+#
+# The `cloud_resource_v2` additions below are the same three classes
+# already stated above (booleans, counts, enums) applied to a wider
+# selection. What stays redacted there is what identifies: `name`,
+# `region`, `externalId`, `providerUniqueId`, `tags` (tenant-authored),
+# `projects` (org-named), `cloudAccount`, and the GraphEntity fields
+# behind `owners`, `codeRepository`, `iacDeployment`, `iacModuleSource`.
+# `owners` and the two analytics objects are allowed as CONTAINERS on
+# the same reasoning as `entitySnapshot`: the walk recurses and the
+# children face the allowlist, so an owner's `type` (the attribution
+# basis) survives while the owner's identity does not.
 SAFE_FIELDS='[
   "_kind","_source","operation_id","response_index","fetched_at",
   "schema_version","result","entitySnapshot",
@@ -82,7 +93,19 @@ SAFE_FIELDS='[
   "createdAt","updatedAt","resolvedAt","dueAt","timestamp",
   "firstDetectedAt","lastDetectedAt","lastScannedAt",
   "op_type","root_field","sensitivity","cost_hint",
-  "required_scopes","scopes_provisional","effects"
+  "required_scopes","scopes_provisional","effects",
+  "isAccessibleFromInternet","isOpenToAllInternet",
+  "hasSensitiveData","hasAccessToSensitiveData",
+  "firstSeen","lastSeen","deletedAt",
+  "owners",
+  "iacDetails","iacStatus","iacPlatform",
+  "iacDetectionMethod","iacDriftDetectionMethod",
+  "issueAnalytics","vulnerabilityAnalytics",
+  "issueCount","criticalSeverityCount","highSeverityCount",
+  "mediumSeverityCount","lowSeverityCount","informationalSeverityCount",
+  "totalFindingCount","criticalSeverityFindingCount",
+  "highSeverityFindingCount","mediumSeverityFindingCount",
+  "lowSeverityFindingCount","informationalSeverityFindingCount"
 ]'
 
 # OWN_REGISTRY kinds carry no tenant data at all; they are stave's own
@@ -297,6 +320,18 @@ selftest() {
   check "field: subscription name" \
     '{"_kind":"cloud_resource","type":"VM","subscriptionName":"Contoso Production"}' \
     'Contoso Production'
+  check "field: v2 tag value" \
+    '{"_kind":"cloud_resource_v2","isOpenToAllInternet":true,"tags":[{"key":"owner","value":"payments-team"}]}' \
+    'payments-team'
+  check "field: v2 owner identity" \
+    '{"_kind":"cloud_resource_v2","owners":[{"type":"DECLARED_OWNER","graphEntity":{"name":"Jane Q Example"}}]}' \
+    'Jane Q Example'
+  check "field: v2 region" \
+    '{"_kind":"cloud_resource_v2","hasSensitiveData":true,"region":"ap-southeast-9"}' \
+    'ap-southeast-9'
+  check "field: v2 code repository" \
+    '{"_kind":"cloud_resource_v2","iacDetails":{"iacStatus":"DRIFTED"},"codeRepository":{"name":"example-corp/infra"}}' \
+    'example-corp/infra'
   check "field: project slug" \
     '{"_kind":"project","archived":false,"slug":"acme-internal"}' \
     'acme-internal'
@@ -386,6 +421,20 @@ selftest() {
     printf 'ok   %-28s\n' "positive control: kept"
   else
     printf 'FAIL %-28s safe fields were destroyed: %s\n' "positive control" "$kept" >&2
+    fail=1
+  fi
+
+  # Second positive control, for the v2 additions specifically. If
+  # these are redacted, `cloud_resource_v2` cannot answer a single
+  # runbook question after scrubbing and the binding is decorative.
+  local v2kept
+  v2kept="$(printf '%s\n' '{"_kind":"cloud_resource_v2","isAccessibleFromInternet":true,"owners":[{"type":"DECLARED_OWNER"}],"issueAnalytics":{"criticalSeverityCount":3}}' | run_scrub)"
+  if printf '%s' "$v2kept" | grep -q '"isAccessibleFromInternet":true' \
+    && printf '%s' "$v2kept" | grep -q 'DECLARED_OWNER' \
+    && printf '%s' "$v2kept" | grep -q '"criticalSeverityCount":3'; then
+    printf 'ok   %-28s\n' "positive control: v2 kept"
+  else
+    printf 'FAIL %-28s v2 safe fields were destroyed: %s\n' "positive control v2" "$v2kept" >&2
     fail=1
   fi
 

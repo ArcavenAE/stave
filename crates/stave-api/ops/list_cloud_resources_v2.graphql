@@ -1,0 +1,133 @@
+# The richer of the two cloud-resource bindings.
+#
+# `cloudResources` returns `CloudResource`, which has eight fields in
+# total; `list_cloud_resources.graphql` already selects six of them, so
+# that binding is at its ceiling. `cloudResourcesV2` returns
+# `CloudResourceV2`, which has 55. This document selects the subset the
+# operator runbooks in docs/runbooks/catalogue.md actually ask for, not
+# the whole type. See docs/design/cloud-resources-v2-notes.md for what
+# was left out and why.
+#
+# Field NAMES are checked against the vendored schema by
+# `cargo xtask check-ops`. Field VALUES are unvalidated against a real
+# tenant (charter B2, F1): nothing here has been through the safety gate
+# yet.
+#
+# `filterBy` and `orderBy` exist on this root field and are deliberately
+# not declared here. Adding them is a separate change with its own
+# semantics, and shipping a wider selection and a new filter surface in
+# one document would make a live failure ambiguous.
+query ListCloudResourcesV2($first: Int, $after: String) {
+  cloudResourcesV2(first: $first, after: $after) {
+    nodes {
+      # Identity and address.
+      id
+      name
+      type
+      nativeType
+      externalId
+      providerUniqueId
+      region
+      cloudPlatform
+      status
+
+      # Lifecycle. `firstSeen` and `lastSeen` are non-null; `deletedAt`
+      # is the tombstone. Together these answer "does the cloud still
+      # report this" (B13.2, C18.2).
+      firstSeen
+      lastSeen
+      createdAt
+      deletedAt
+
+      # Exposure (A2.3, A3.2).
+      isAccessibleFromInternet
+      isOpenToAllInternet
+
+      # Sensitive data (A3.3).
+      hasSensitiveData
+      hasAccessToSensitiveData
+
+      # Ownership and attribution (A1.4, A2.4, B8, C20). `owners.type`
+      # is the attribution BASIS (declared owner, tag, activity
+      # creator, code owner), which is what C20.2 asks for.
+      owners {
+        type
+        graphEntity {
+          id
+          name
+          type
+        }
+      }
+      projects {
+        id
+        name
+        slug
+      }
+      tags {
+        key
+        value
+      }
+
+      # The owning account, selected directly rather than joined. The
+      # v1 kind carries `subscriptionExternalId` and relies on
+      # `stave enrich --with account-context` to resolve it; here the
+      # account arrives with the record.
+      cloudAccount {
+        id
+        name
+        externalId
+        cloudProvider
+      }
+
+      # Infrastructure as code (C15). `iacDetails` reports whether the
+      # resource is IaC-managed and drifting; the three GraphEntity
+      # fields are the address of the producing artifact.
+      iacDetails {
+        iacStatus
+        iacPlatform
+        iacDetectionMethod
+        iacDriftDetectionMethod
+      }
+      iacDeployment {
+        id
+        name
+        type
+      }
+      iacModuleSource {
+        id
+        name
+        type
+      }
+      codeRepository {
+        id
+        name
+        type
+        providerUniqueId
+      }
+
+      # Per-resource rollups (A3.4 ranking). Server-side counts, so a
+      # ranked sweep does not need a second pass over issues or
+      # findings.
+      issueAnalytics {
+        issueCount
+        criticalSeverityCount
+        highSeverityCount
+        mediumSeverityCount
+        lowSeverityCount
+        informationalSeverityCount
+      }
+      vulnerabilityAnalytics {
+        totalFindingCount
+        criticalSeverityFindingCount
+        highSeverityFindingCount
+        mediumSeverityFindingCount
+        lowSeverityFindingCount
+        informationalSeverityFindingCount
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

@@ -47,7 +47,7 @@ fn ops_permissions_reports_scopes_and_metadata_offline() {
     let out = run(sandbox.cmd().args(["ops", "permissions"]));
     assert!(out.status.success(), "{}", stderr_of(&out));
     let rows = jsonl(&stdout_of(&out));
-    assert_eq!(rows.len(), 12, "one row per curated operation");
+    assert_eq!(rows.len(), 13, "one row per curated operation");
     for row in &rows {
         assert_eq!(row["_kind"], "operation_permissions");
         assert!(

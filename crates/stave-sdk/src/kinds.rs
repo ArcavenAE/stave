@@ -22,6 +22,11 @@ use serde_json::Value;
 pub const KIND_ISSUE: &str = "issue";
 pub const KIND_VULNERABILITY_FINDING: &str = "vulnerability_finding";
 pub const KIND_CLOUD_RESOURCE: &str = "cloud_resource";
+/// The `cloudResourcesV2` binding of the same noun. Kept beside
+/// `cloud_resource` rather than replacing it: the two carry different
+/// field sets, and re-pointing `cloud_resource` at the richer root
+/// would change the shape of a stream consumers already read.
+pub const KIND_CLOUD_RESOURCE_V2: &str = "cloud_resource_v2";
 pub const KIND_PROJECT: &str = "project";
 pub const KIND_REPORT: &str = "report";
 pub const KIND_CONTROL: &str = "control";
@@ -37,6 +42,7 @@ pub const ALL_KINDS: &[&str] = &[
     KIND_ISSUE,
     KIND_VULNERABILITY_FINDING,
     KIND_CLOUD_RESOURCE,
+    KIND_CLOUD_RESOURCE_V2,
     KIND_PROJECT,
     KIND_REPORT,
     KIND_CONTROL,
@@ -110,6 +116,23 @@ const KIND_TABLE: &[KindSpec] = &[
         id_field: "id",
         severity_field: None,
         primary_timestamp_field: None,
+        search_field: Some("name"),
+    },
+    KindSpec {
+        name: KIND_CLOUD_RESOURCE_V2,
+        list_operation: "list_cloud_resources_v2",
+        id_field: "id",
+        // A resource has no severity of its own. `issueAnalytics` and
+        // `vulnerabilityAnalytics` carry per-severity COUNTS, which is
+        // a different shape: `emit` expects a single severity value,
+        // and pointing it at a count object would print nonsense.
+        severity_field: None,
+        // `firstSeen` is non-null and is when the resource entered the
+        // security graph, which is what `--since` means for an
+        // inventory. `createdAt` is the cloud-side creation time and is
+        // nullable; `lastSeen` answers a different question (is it
+        // still there) and belongs in a predicate, not in `--since`.
+        primary_timestamp_field: Some("firstSeen"),
         search_field: Some("name"),
     },
     KindSpec {
@@ -212,12 +235,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twelve_kinds_in_table() {
-        assert_eq!(KIND_TABLE.len(), 12);
-        assert_eq!(ALL_KINDS.len(), 12);
+    fn thirteen_kinds_in_table() {
+        assert_eq!(KIND_TABLE.len(), 13);
+        assert_eq!(ALL_KINDS.len(), 13);
         for (a, b) in KIND_TABLE.iter().zip(ALL_KINDS.iter()) {
             assert_eq!(&a.name, b);
         }
+    }
+
+    #[test]
+    fn both_cloud_resource_kinds_are_present_and_distinct() {
+        let v1 = kind_spec("cloud_resource").expect("v1 in table");
+        let v2 = kind_spec("cloud_resource_v2").expect("v2 in table");
+        assert_eq!(v1.list_operation, "list_cloud_resources");
+        assert_eq!(v2.list_operation, "list_cloud_resources_v2");
+        // v1 has no usable timestamp; v2 does. That difference is the
+        // reason the second kind exists rather than replacing the first.
+        assert_eq!(v1.primary_timestamp_field, None);
+        assert_eq!(v2.primary_timestamp_field, Some("firstSeen"));
     }
 
     #[test]

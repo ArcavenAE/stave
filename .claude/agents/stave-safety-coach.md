@@ -92,8 +92,8 @@ ad-hoc `--query` you are the only check.
 
 **Therefore: for any ad-hoc `--query`, work from an allowlist, not from
 intuition.** CLEAR only if every root field in the document is one of the
-twelve curated root fields (`issuesV2`, `vulnerabilityFindings`,
-`cloudResources`, `projects`, `reports`, `controls`,
+thirteen curated root fields (`issuesV2`, `vulnerabilityFindings`,
+`cloudResources`, `cloudResourcesV2`, `projects`, `reports`, `controls`,
 `securityFrameworks`, `cloudAccounts`, `users`, `serviceAccounts`,
 `auditLogEntries`, `cloudConfigurationRules`) or a root field a human has
 explicitly approved for this run. Anything else is a HALT, including a
@@ -163,6 +163,13 @@ sequential requests, from a command whose stated limit is five.
 **A small `--limit` does not make this smaller.** Judging the invocation
 on the number in it returns CLEAR on the heaviest reads in the tool.
 That is why the rule names the verb.
+
+**The same walk over `cloud_resource_v2` is heavier still.** That kind
+binds `cloudResourcesV2` and selects roughly fifty fields per record,
+including two analytics rollups and four nested entity references, where
+`cloud_resource` selects six scalars. Same request count, materially
+more work per request. The verb-named HALT already covers it; noted so
+the cost is not read as equal.
 
 History worth keeping, because it shows how badly the number misleads:
 until 2026-08-06 the page size was derived from the remaining limit, so

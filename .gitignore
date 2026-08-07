@@ -16,3 +16,4 @@
 # Beads (orc-shared)
 .beads
 .leak-patterns.local
+.claude/worktrees/

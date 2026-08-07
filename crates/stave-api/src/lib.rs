@@ -175,6 +175,28 @@ pub const OPERATIONS: &[OperationDoc] = &[
         effects: None,
     },
     OperationDoc {
+        name: "list_cloud_resources_v2",
+        document: include_str!("../ops/list_cloud_resources_v2.graphql"),
+        op_type: OpType::Query,
+        root_field: "cloudResourcesV2",
+        description: "Cloud resources with exposure, sensitive-data, ownership, IaC, and rollups",
+        // Same declaration as `list_cloud_resources`. The two bind
+        // different root fields on the same noun, and nothing offline
+        // can tell us whether Wiz gates the richer one differently.
+        // Provisional under SCOPE_METADATA_PROVISIONAL like every other
+        // entry, with the extra caveat that this one was matched to its
+        // v1 sibling rather than derived.
+        required_scopes: &["read:resources"],
+        // Stronger than `list_cloud_resources` (Normal): this selection
+        // carries internet-exposure and sensitive-data flags plus issue
+        // and vulnerability counts per resource. It ALSO carries owner
+        // identity, which a single-valued Sensitivity cannot express;
+        // Posture is the closer of the two available answers.
+        sensitivity: Sensitivity::Posture,
+        cost_hint: CostHint::Heavy,
+        effects: None,
+    },
+    OperationDoc {
         name: "list_projects",
         document: include_str!("../ops/list_projects.graphql"),
         op_type: OpType::Query,
@@ -285,8 +307,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twelve_operations_registered() {
-        assert_eq!(OPERATIONS.len(), 12);
+    fn thirteen_operations_registered() {
+        assert_eq!(OPERATIONS.len(), 13);
+    }
+
+    #[test]
+    fn both_cloud_resource_bindings_are_registered() {
+        // The v2 binding ships BESIDE v1, not instead of it: replacing
+        // v1 would change the shape of an existing `_kind` stream.
+        let v1 = find("list_cloud_resources").expect("v1 registered");
+        let v2 = find("list_cloud_resources_v2").expect("v2 registered");
+        assert_eq!(v1.root_field, "cloudResources");
+        assert_eq!(v2.root_field, "cloudResourcesV2");
     }
 
     #[test]
