@@ -241,7 +241,7 @@ EOF
   # So: record the binary's own identity, and refuse when the two
   # disagree. `stave --version` is on the coach's own fast path, which is
   # why it can run here without a verdict.
-  local bin_path bin_ver bin_sha tree_sha bin_dirty=0 skew_reason=""
+  local bin_path bin_ver bin_sha tree_sha bin_dirty=0 skew_reason="" skew_basis=""
   bin_path="$(command -v "$STAVE_BIN_NAME" 2>/dev/null || true)"
   [[ -n "$bin_path" ]] || die "init: no '$STAVE_BIN_NAME' on PATH" "$EX_STATE"
   bin_ver="$("$bin_path" --version 2>/dev/null | head -1 || true)"
@@ -254,18 +254,32 @@ EOF
   bin_sha="$(printf '%s' "$bin_ver" | grep -oE '[0-9a-f]{7,}' | tail -1 || true)"
   [[ "$bin_ver" == *dirty* ]] && bin_dirty=1
 
+  # `skew_basis` records WHICH test decided, and is written to run_start
+  # whether the test passed or failed. Without it a passing dirty build
+  # is indistinguishable from an unchecked one: run_start showed
+  # `dev+g08a5350-dirty` against `repo_commit 06abc1b` with a null
+  # skew_reason, and reading that mid-run I concluded the sha comparison
+  # had been skipped by mistake and that the whole run had measured the
+  # wrong document set. It had not. The comparison is skipped on purpose,
+  # for the reason directly below, and the record should say so rather
+  # than leave the next reader to reconstruct it from this source file.
   if [[ "$bin_dirty" -eq 1 ]]; then
     # A dirty build corresponds to NO commit, and build.rs does not
     # re-run on every HEAD move, so the sha inside a dev version is not
     # trustworthy either. Fall back to something that does not depend on
     # the binary's self-report: is any source file newer than the binary?
     local newest
+    skew_basis="mtime: dirty build, so the sha in the version string is not a commit and is deliberately not compared"
     newest="$(find "$REPO_ROOT/crates" "$REPO_ROOT/spec" -type f -newer "$bin_path" -print -quit 2>/dev/null || true)"
     [[ -n "$newest" ]] && skew_reason="a source file changed after this binary was built: ${newest#"$REPO_ROOT"/}"
   elif [[ "$bin_sha" == "" ]]; then
+    skew_basis="none: the version string names no commit to compare"
     skew_reason="the binary's version string names no commit: $bin_ver"
-  elif [[ "$tree_sha" != "unknown" && "$bin_sha" != "$tree_sha"* && "$tree_sha" != "$bin_sha"* ]]; then
-    skew_reason="the binary was built from $bin_sha; the tree is at $tree_sha"
+  else
+    skew_basis="commit: binary $bin_sha against tree $tree_sha"
+    if [[ "$tree_sha" != "unknown" && "$bin_sha" != "$tree_sha"* && "$tree_sha" != "$bin_sha"* ]]; then
+      skew_reason="the binary was built from $bin_sha; the tree is at $tree_sha"
+    fi
   fi
 
   if [[ -n "$skew_reason" && "$skew_ok" -ne 1 ]]; then
@@ -293,10 +307,11 @@ EOF
   jq -n --arg sv "$tree_sha" --arg bp "$bin_path" --arg bv "$bin_ver" \
         --argjson skew "$([[ "$skew_ok" -eq 1 ]] && echo true || echo false)" \
         --argjson dirty "$([[ "$bin_dirty" -eq 1 ]] && echo true || echo false)" \
-        --arg sr "$skew_reason" \
+        --arg sr "$skew_reason" --arg sb "$skew_basis" \
         --arg audit "$AUDIT_DIR" --arg run_dir "$RUN_DIR" '
     {repo_commit: $sv, binary_path: $bp, binary_version: $bv,
      binary_dirty: $dirty, skew_allowed: $skew,
+     skew_basis: (if $sb == "" then null else $sb end),
      skew_reason: (if $sr == "" then null else $sr end),
      audit_dir: $audit, run_dir: $run_dir}
   ' | append_entry run_start
@@ -1030,6 +1045,14 @@ STUB
     < "$rd/runlog.jsonl" >/dev/null \
     && ok_ "version: binary identity and the skew waiver are recorded" \
     || bad_ "version: binary identity and the skew waiver are recorded"
+
+  # skew_basis names the test that decided, so a passing check is not
+  # mistaken for an absent one. The stub reports a clean alpha version,
+  # so the commit branch is the one that must be named here.
+  jq -e 'select(.type=="run_start") | (.skew_basis // "") | startswith("commit:")' \
+    < "$rd/runlog.jsonl" >/dev/null \
+    && ok_ "version: skew_basis names which test decided" \
+    || bad_ "version: skew_basis names which test decided"
   export STAVE_RUNLOG_DIR="$rd"
 
   coach() { # $1 verdict, $2 command, [$3 doubt]

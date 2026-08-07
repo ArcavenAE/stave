@@ -329,9 +329,47 @@ and how much rides on it:
 2. **`actionParameters`.** Is `JSON!` an object in practice, and does it
    carry the before/after detail B10 step 1 needs, or only an action
    name.
+
+   *Answered 2026-08-07, live at `--limit 20`, and not with either of
+   the two answers the question anticipated.* The field is **absent**.
+   Across 20 records the only keys present are `id`, `action`, `status`,
+   `timestamp`. `actionParameters`, `actionType`, `sourceIP` and
+   `performer` do not arrive at all, with `result: ok` and no GraphQL
+   error. `actionType` is on the scrubber's allowlist, so its absence is
+   not redaction.
+
+   Ruled out as the cause, all offline: the scrubber preserves every key
+   including nulls (verified on a synthetic audit record); nulls survive
+   for other kinds in the same run (`issue` carries `assignee`,
+   `serviceTickets` and `dueAt` as explicit nulls, 20/20); and
+   `stave-sdk` has no per-kind field projection. The omission is
+   upstream of stave, which is not the same claim as "the tenant has no
+   data."
+
+   Hypothesis, untested by anything here: silent scope stripping. A
+   server that drops fields the service account cannot read, rather than
+   erroring on them, produces exactly this shape — and this is the same
+   service account that charter F1 records as not exposing readable
+   granted scopes.
+
+   For B10 step 1 the consequence is the same either way: the audit log
+   yields no actor and no parameters on this tenant, and `aae-orc-x7iv`
+   does not recover it, since a key that never arrives cannot be
+   un-redacted.
 3. **The nested connections on `list_security_frameworks`.** Does
    `first: 100` apply, does `totalCount` return, and what does the
    response actually cost. Check at `--limit 1` first.
+
+   *Partly settled 2026-08-07, live at `--limit 1`.* The document
+   validates and the server answers: exit 0, one record, 1041ms, 323
+   bytes of scrubbed output. So the cost question is answered and the
+   selection is real. `totalCount` and the inner `hasNextPage` are
+   **not** answerable through the harness, and the obstacle is ours
+   rather than the tenant's: `controls` and `cloudConfigurationRules`
+   are not on the scrubber's field allowlist, so each container is
+   redacted whole and its scalars go with it. `--catalog` does not lift
+   this — it relaxes the pattern tier, not the field allowlist, which
+   this run measured rather than assumed. Tracked as `aae-orc-x7iv`.
 4. **The seven deprecated-field substitutions.** Each was chosen from
    deprecation text, not from observed data. The specific question per
    row is whether the successor is populated where the deprecated field
