@@ -164,6 +164,21 @@ sequential requests, from a command whose stated limit is five.
 on the number in it returns CLEAR on the heaviest reads in the tool.
 That is why the rule names the verb.
 
+**`list security_framework` now fans out multiplicatively, and no rule
+above catches it.** Since 2026-08-07 that document selects two nested
+connections per framework (`controls` and `cloudConfigurationRules`),
+each with a literal page size of 100, and the pager walks only the outer
+connection. So `--limit 50` is not fifty records; it is up to fifty
+frameworks times two hundred nested records, in one request each.
+
+This is a plain `list` with no `--since` and possibly a small `--limit`,
+so checks 4's verb-keyed rules do not fire. **Treat any
+`list security_framework` above a very small `--limit` as a large read
+and HALT it.** The document selects `totalCount` and the inner
+`hasNextPage` so truncation is visible rather than looking complete;
+say so when you halt, because the operator needs to know a low limit
+gives a partial answer rather than a wrong one.
+
 **The same walk over `cloud_resource_v2` is heavier still.** That kind
 binds `cloudResourcesV2` and selects roughly fifty fields per record,
 including two analytics rollups and four nested entity references, where

@@ -105,8 +105,52 @@ SAFE_FIELDS='[
   "mediumSeverityCount","lowSeverityCount","informationalSeverityCount",
   "totalFindingCount","criticalSeverityFindingCount",
   "highSeverityFindingCount","mediumSeverityFindingCount",
-  "lowSeverityFindingCount","informationalSeverityFindingCount"
+  "lowSeverityFindingCount","informationalSeverityFindingCount",
+  "lastLoginAt","lastRotatedAt","expiresAt","firstScannedAt",
+  "statusChangedAt","reopenedAt","rejectionExpiredAt",
+  "cisaKevDueDate","lastRunAt","lastSuccessfulRunAt","lastSeenAt",
+  "isSuspended","hasFix","hasExploit",
+  "actionType","openReason","resolutionReason","fixedVersion",
+  "criticalSystemHealthIssueCount","highSystemHealthIssueCount"
 ]'
+
+# The 2026-08-07 widening (bd aae-orc-qijl) made nine kinds ask for more
+# fields, and default-deny redacted nearly all of them. That left runbook
+# A4 reachable at the API and unreadable at the terminal in the same
+# change: `createdAt` survived while `lastLoginAt` and `lastRotatedAt`,
+# which are the runbook's entire question, did not. Those are the same
+# class of data as the timestamps already allowed above, so the
+# inconsistency was in the allowlist and not in the request.
+#
+# What was added is timestamps, booleans, enums, and counts. Nothing
+# else.
+#
+# What was deliberately NOT added, because each identifies something:
+#
+#   sourceIP           an IP address; tenant-data-hygiene names these
+#   performer          who did it
+#   assignee           who owns it
+#   resolvedBy         who closed it
+#   actionParameters   arbitrary JSON from an audit entry
+#   projects           org-named
+#   linkedProjects     org-named
+#   projectOwners      people
+#   securityChampions  people
+#   businessUnit       org structure
+#   tags               tenant-authored, the usual home of owner emails
+#   serviceTickets     ticket ids and URLs
+#   vulnerableAsset    the resource itself
+#   rootComponent      package and path
+#   layerMetadata      image layer identity
+#   sourceRules        may carry tenant-authored rule names
+#   effectiveRole      may carry tenant-authored custom role names
+#
+# `scopes` is the interesting refusal and is deliberate. Scope names are
+# not tenant-identifying on their own, and bd aae-orc-8af5 wants the
+# field. But a SCRUBBED service-account inventory showing which accounts
+# hold admin grants is precisely the targeting map this rule exists to
+# prevent. 8af5 reads it raw in a terminal under the hygiene rule's
+# narrow exception, and it never reaches a durable artifact.
 
 # OWN_REGISTRY kinds carry no tenant data at all; they are stave's own
 # curated operation metadata, identical on every machine. Passed
@@ -332,6 +376,21 @@ selftest() {
   check "field: v2 code repository" \
     '{"_kind":"cloud_resource_v2","iacDetails":{"iacStatus":"DRIFTED"},"codeRepository":{"name":"example-corp/infra"}}' \
     'example-corp/infra'
+  check "field: audit source IP" \
+    '{"_kind":"audit_log_entry","actionType":"UPDATE","sourceIP":"203.0.113.9"}' \
+    '203.0.113.9'
+  check "field: audit performer identity" \
+    '{"_kind":"audit_log_entry","actionType":"UPDATE","performer":{"name":"Jane Q Example"}}' \
+    'Jane Q Example'
+  check "field: audit action parameters" \
+    '{"_kind":"audit_log_entry","actionType":"UPDATE","actionParameters":{"bucket":"example-corp-secrets"}}' \
+    'example-corp-secrets'
+  check "field: service account scopes" \
+    '{"_kind":"service_account","enabled":true,"scopes":["read:issues","admin:audit"]}' \
+    'admin:audit'
+  check "field: issue assignee" \
+    '{"_kind":"issue","statusChangedAt":"2026-08-01T00:00:00Z","assignee":{"name":"Jane Q Example"}}' \
+    'Jane Q Example'
   check "field: project slug" \
     '{"_kind":"project","archived":false,"slug":"acme-internal"}' \
     'acme-internal'
