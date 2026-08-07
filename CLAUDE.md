@@ -20,6 +20,15 @@ live tenant by default. Third sibling of sidestep and bloomctl.
 > Full rule: `.claude/rules/tenant-data-hygiene.md`.
 > Procedure before publishing: the `tenant-leak-scan` skill.
 
+> **⚠ Safety coach gate (load-bearing).** Before typing `stave`
+> followed by anything, hand the exact invocation to the
+> `stave-safety-coach` subagent and wait for CLEAR or HALT. The tenant
+> is a live production environment for an IS team. Runbook steps
+> phrased as actions (assign, clear, comment, classify, accept) are
+> **simulated, never performed**. A HALT stops the run and goes to the
+> human, who decides skip, proceed, or stop.
+> Full rule: `.claude/rules/safety-coach-gate.md`.
+
 @charter.md
 @.claude/rules/_index.md
 

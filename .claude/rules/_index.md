@@ -6,3 +6,4 @@
 @rust.md
 @cli-philosophy.md
 @tenant-data-hygiene.md
+@safety-coach-gate.md
