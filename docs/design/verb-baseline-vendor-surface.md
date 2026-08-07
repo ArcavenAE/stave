@@ -1,5 +1,15 @@
 # v0.2 Composite Verbs, Derived From the Vendor Surface
 
+> **STOP if you are writing the paper pipelines (bd `aae-orc-e4jo.14`).**
+> This file is the control arm. Reading it before writing the pipelines
+> contaminates the treatment arm and destroys the comparison the whole
+> exercise is built on. You are here because this file sits next to
+> `field-surface-audit.md`, which IS yours to read. That one, not this
+> one.
+>
+> Read this only at the gate (`.15`), in the mining (`.7`), or in the
+> proposal (`.8`).
+
 **Sealed control arm for bd ticket `aae-orc-e4jo.12`.**
 
 This document was written from the vendor surface alone: the vendored
