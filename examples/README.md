@@ -11,7 +11,12 @@ examples/
 │   ├── vulnerability_finding.jsonl 5 records (4 severities, 2 sharing HIGH
 │   │                               so the rank tiebreak is exercised)
 │   ├── cloud_resource.jsonl        4 records (2 accounts, 1 orphan subscription)
-│   └── cloud_account.jsonl         2 records (join targets: AWS + Azure)
+│   ├── cloud_account.jsonl         2 records (join targets: AWS + Azure)
+│   └── external/                   4 exports the security graph does not
+│                                   hold (CMDB, vended accounts, tickets,
+│                                   IaC), for the class B join runbooks.
+│                                   Its README states the correct answer
+│                                   to each join, measured over the files.
 ├── asserts/
 │   ├── _lib.sh                     shared helpers (binary probe, normalize)
 │   ├── 01-round-trip.sh            parse + filter(_kind) + emit is lossless
@@ -19,10 +24,14 @@ examples/
 │   │                               orphan subscription yields null
 │   └── 03-rank-stability.sh        severity ordering is deterministic,
 │                                   CRITICAL first, tiebreak on firstDetectedAt
-└── recipes/
-    ├── issue-triage.sh             list issue | entity-hoist | filter severity | md
-    ├── vuln-exposure.sh            list vulnerability_finding | severity-roll-up | md
-    └── resource-inventory.sh       list cloud_resource | account-context | md
+├── recipes/
+│   ├── issue-triage.sh             list issue | entity-hoist | filter severity | md
+│   ├── vuln-exposure.sh            list vulnerability_finding | severity-roll-up | md
+│   └── resource-inventory.sh       list cloud_resource | account-context | md
+└── runlog/                         worked example for the run harness:
+                                    a stub binary, a driver, and the
+                                    runlog it produces. See its README
+                                    and docs/design/runlog-harness.md.
 ```
 
 ## Running
