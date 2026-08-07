@@ -22,6 +22,26 @@ fn token_with_scopes(scopes: &[&str]) -> String {
     fake_jwt(serde_json::json!({ "scope": scopes.join(" "), "sub": "svc-example" }))
 }
 
+/// The scopes a curated operation declares, read from the registry
+/// rather than restated here.
+///
+/// These tests pin the subset logic, not the registry's contents. A
+/// hardcoded fixture conflates the two: the 2026-08-07 widening
+/// (bd `aae-orc-qijl`) took `list_issues` from one scope to four and
+/// broke three tests that had nothing to say about widening. Deriving
+/// the fixture means the next widening breaks a test only when it
+/// breaks the logic.
+fn scopes_of(op: &str) -> Vec<&'static str> {
+    stave_sdk::ops::find(op)
+        .expect("operation is in the registry")
+        .required_scopes
+        .to_vec()
+}
+
+/// A scope some other curated operation needs and `list_issues` does
+/// not, for exercising the excess-drift arm.
+const SCOPE_NO_ISSUE_READ_NEEDS: &str = "read:reports";
+
 /// A token shaped like a real Wiz service-account token (F1,
 /// 2026-08-06): scopes live in an opaque `encodedScopes` bitmask, not
 /// readable strings.
@@ -121,10 +141,10 @@ fn auth_scopes_without_a_token_errors_cleanly() {
 #[test]
 fn can_i_yes_when_the_scope_is_granted() {
     let sandbox = Sandbox::new();
-    let out = run(sandbox
-        .cmd()
-        .args(["auth", "can-i", "list_issues"])
-        .env("STAVE_ACCESS_TOKEN", token_with_scopes(&["read:issues"])));
+    let out = run(sandbox.cmd().args(["auth", "can-i", "list_issues"]).env(
+        "STAVE_ACCESS_TOKEN",
+        token_with_scopes(&scopes_of("list_issues")),
+    ));
     assert!(
         out.status.success(),
         "exit 0 on allowed: {}",
@@ -241,17 +261,36 @@ fn plan_lists_grant_and_do_not_grant_for_a_subset() {
 
 #[test]
 fn plan_check_reports_missing_and_excess_separately() {
-    // Grant read:projects only, plan for list_issues only:
-    //   missing = read:issues (unusable), excess = read:projects.
+    // Grant one scope list_issues does not need, and none that it does:
+    //   missing = every scope list_issues declares (unusable),
+    //   excess = the granted one.
     let sandbox = Sandbox::new();
     let out = run(sandbox
         .cmd()
         .args(["auth", "plan", "--op", "list_issues", "--check"])
-        .env("STAVE_ACCESS_TOKEN", token_with_scopes(&["read:projects"])));
+        .env(
+            "STAVE_ACCESS_TOKEN",
+            token_with_scopes(&[SCOPE_NO_ISSUE_READ_NEEDS]),
+        ));
     assert_eq!(out.status.code(), Some(1), "drift must exit nonzero");
     let record: Value = serde_json::from_str(stdout_of(&out).trim()).expect("one JSON object");
-    assert_eq!(record["missing"][0], "read:issues");
-    assert_eq!(record["excess"][0], "read:projects");
+    // `plan` sorts and dedupes the requirement, so compare as sets.
+    let mut missing: Vec<&str> = record["missing"]
+        .as_array()
+        .expect("missing is an array")
+        .iter()
+        .map(|v| v.as_str().expect("scope is a string"))
+        .collect();
+    missing.sort_unstable();
+    let mut required = scopes_of("list_issues");
+    required.sort_unstable();
+    required.dedup();
+    assert!(
+        !required.contains(&SCOPE_NO_ISSUE_READ_NEEDS),
+        "the excess fixture must stay outside the requirement"
+    );
+    assert_eq!(missing, required, "nothing required was granted");
+    assert_eq!(record["excess"][0], SCOPE_NO_ISSUE_READ_NEEDS);
 }
 
 #[test]
@@ -260,7 +299,10 @@ fn plan_check_passes_when_scopes_match_exactly() {
     let out = run(sandbox
         .cmd()
         .args(["auth", "plan", "--op", "list_issues", "--check"])
-        .env("STAVE_ACCESS_TOKEN", token_with_scopes(&["read:issues"])));
+        .env(
+            "STAVE_ACCESS_TOKEN",
+            token_with_scopes(&scopes_of("list_issues")),
+        ));
     assert!(
         out.status.success(),
         "exact match must exit 0: {}",

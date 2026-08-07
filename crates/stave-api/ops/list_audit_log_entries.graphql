@@ -1,11 +1,33 @@
-# Provisional until live introspection (see charter F1).
+# Widened 2026-08-07 (bd aae-orc-qijl). Every field added here is
+# UNVALIDATED against the live API (charter B2, F1). See
+# docs/design/widening-notes.md.
+#
+# `user` and `serviceAccount` were on the widening list but both are
+# deprecated in the schema ("use `performer` instead"), so `performer`
+# is selected in their place. It is the `SystemPrincipalSnapshot`
+# interface, whose two implementers are `UserSnapshot` and
+# `ServiceAccountSnapshot`, so `__typename` distinguishes a human actor
+# from a service account without a second selection set.
+#
+# `performer` is deliberately held to id and name. The snapshot types
+# carry a link back to the full `User` / `ServiceAccount`, which would
+# pull employee email into every audit line for no runbook step that
+# asks for it.
 query ListAuditLogEntries($first: Int, $after: String) {
   auditLogEntries(first: $first, after: $after) {
     nodes {
       id
       action
+      actionType
+      actionParameters
       status
       timestamp
+      sourceIP
+      performer {
+        __typename
+        id
+        name
+      }
     }
     pageInfo {
       hasNextPage

@@ -1,10 +1,25 @@
-# Provisional until live introspection (see charter F1).
+# Widened 2026-08-07 (bd aae-orc-qijl). Every field added here is
+# UNVALIDATED against the live API (charter B2, F1). See
+# docs/design/widening-notes.md.
+#
+# `role` was on the widening list but is deprecated in the schema with
+# reason "No longer supported", so `effectiveRole` is selected in its
+# place. It is `UserRole!`, held to id and name: `UserRole.scopes` is
+# the interesting field for a privilege review and is a separate ask,
+# not a free rider on the roster query.
 query ListUsers($first: Int, $after: String) {
   users(first: $first, after: $after) {
     nodes {
       id
       name
       email
+      lastLoginAt
+      enabled
+      isSuspended
+      effectiveRole {
+        id
+        name
+      }
     }
     pageInfo {
       hasNextPage

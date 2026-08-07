@@ -1,5 +1,11 @@
-# Provisional until live introspection (see charter F1). Conservative
-# field selection drawn from Wiz's published API examples.
+# Widened 2026-08-07 (bd aae-orc-qijl) from the nine-field scaffold
+# selection. Every field added here is UNVALIDATED against the live API
+# (charter B2, F1). See docs/design/widening-notes.md.
+#
+# `control` was on the widening list but is deprecated in the schema
+# ("use sourceRules instead"), so `sourceRules` is selected in its
+# place. `Control` is one of three types implementing IssueSourceRule,
+# so `__typename` says which kind of rule raised the issue.
 query ListIssues($first: Int, $after: String) {
   issuesV2(first: $first, after: $after) {
     nodes {
@@ -11,6 +17,41 @@ query ListIssues($first: Int, $after: String) {
       updatedAt
       resolvedAt
       dueAt
+      statusChangedAt
+      reopenedAt
+      openReason
+      resolutionReason
+      rejectionExpiredAt
+      resolvedBy {
+        type
+        user {
+          id
+          name
+        }
+        serviceAccount {
+          id
+          name
+        }
+      }
+      assignee {
+        id
+        name
+      }
+      projects {
+        id
+        name
+        slug
+      }
+      serviceTickets {
+        id
+        name
+        externalId
+      }
+      sourceRules {
+        __typename
+        id
+        name
+      }
       entitySnapshot {
         id
         type

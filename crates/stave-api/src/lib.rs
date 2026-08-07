@@ -129,6 +129,18 @@ pub struct OperationDoc {
     /// Wiz API scopes this operation needs (D3, provisional until F1).
     /// `cargo xtask check-ops` fails when this is empty: no verb enters
     /// the registry without declaring its permission cost.
+    ///
+    /// The 2026-08-07 widening added joined scopes under one rule: a
+    /// joined type earns a scope only when another registry operation
+    /// lists exactly that type as its kind (`Issue.projects` reads
+    /// `Project`, and `list_projects` declares `read:projects`).
+    /// Joins to types with no registry analogue (`Identity`,
+    /// `VulnerableAsset`, `Deployment`, `ServiceTicket`,
+    /// `SecuritySubCategory`, `UserRole`, `IgnoreRule`) add nothing,
+    /// because inventing a scope name would be a guess `auth plan`
+    /// would then hand to an operator as a provisioning instruction.
+    /// Whether Wiz enforces scopes at nested-field granularity at all
+    /// is itself unverified. See docs/design/widening-notes.md.
     pub required_scopes: &'static [&'static str],
     /// What class of data this READ returns (D4a).
     pub sensitivity: Sensitivity,
@@ -146,8 +158,14 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_issues.graphql"),
         op_type: OpType::Query,
         root_field: "issuesV2",
-        description: "Issues with severity, status, and the affected entity snapshot",
-        required_scopes: &["read:issues"],
+        description: "Issues with severity, status, lifecycle timestamps, assignee, \
+                      projects, service tickets, and the affected entity snapshot",
+        required_scopes: &[
+            "read:issues",
+            "read:projects",
+            "read:users",
+            "read:service_accounts",
+        ],
         sensitivity: Sensitivity::Posture,
         cost_hint: CostHint::Heavy,
         effects: None,
@@ -157,8 +175,9 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_vulnerability_findings.graphql"),
         op_type: OpType::Query,
         root_field: "vulnerabilityFindings",
-        description: "Vulnerability findings with vendor severity and detection window",
-        required_scopes: &["read:vulnerabilities"],
+        description: "Vulnerability findings with canonical severity, fix and exploit \
+                      status, the vulnerable asset, and the detection window",
+        required_scopes: &["read:vulnerabilities", "read:projects"],
         sensitivity: Sensitivity::Posture,
         cost_hint: CostHint::Heavy,
         effects: None,
@@ -201,10 +220,13 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_projects.graphql"),
         op_type: OpType::Query,
         root_field: "projects",
-        description: "Wiz projects (slug, description, archived)",
-        required_scopes: &["read:projects"],
-        sensitivity: Sensitivity::Normal,
-        cost_hint: CostHint::Light,
+        description: "Wiz projects with owners, security champions, business unit, and tags",
+        required_scopes: &["read:projects", "read:users"],
+        // Normal until 2026-08-07. `projectOwners` and
+        // `securityChampions` name real employees, so the old value
+        // understated what the read returns.
+        sensitivity: Sensitivity::Identity,
+        cost_hint: CostHint::Heavy,
         effects: None,
     },
     OperationDoc {
@@ -223,10 +245,11 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_controls.graphql"),
         op_type: OpType::Query,
         root_field: "controls",
-        description: "Controls with severity and enablement",
+        description: "Controls with severity, enablement, last-run health, service tickets, \
+                      and compliance sub-categories",
         required_scopes: &["read:controls"],
         sensitivity: Sensitivity::Normal,
-        cost_hint: CostHint::Light,
+        cost_hint: CostHint::Heavy,
         effects: None,
     },
     OperationDoc {
@@ -234,10 +257,18 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_security_frameworks.graphql"),
         op_type: OpType::Query,
         root_field: "securityFrameworks",
-        description: "Security/compliance frameworks",
-        required_scopes: &["read:security_frameworks"],
+        // Heavy and multiplicative, not merely heavy: two nested
+        // connections of 100 ride on every framework in the outer page,
+        // and stave's pager walks the outer connection only.
+        description: "Security/compliance frameworks with their control and \
+                      cloud-configuration-rule rosters (nested pages capped at 100)",
+        required_scopes: &[
+            "read:security_frameworks",
+            "read:controls",
+            "read:cloud_configuration",
+        ],
         sensitivity: Sensitivity::Normal,
-        cost_hint: CostHint::Light,
+        cost_hint: CostHint::Heavy,
         effects: None,
     },
     OperationDoc {
@@ -245,10 +276,11 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_cloud_accounts.graphql"),
         op_type: OpType::Query,
         root_field: "cloudAccounts",
-        description: "Connected cloud accounts with provider and status",
-        required_scopes: &["read:cloud_accounts"],
+        description: "Connected cloud accounts with scan window, system-health counts, \
+                      linked projects, and source deployments",
+        required_scopes: &["read:cloud_accounts", "read:projects"],
         sensitivity: Sensitivity::Normal,
-        cost_hint: CostHint::Light,
+        cost_hint: CostHint::Heavy,
         effects: None,
     },
     OperationDoc {
@@ -256,7 +288,7 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_users.graphql"),
         op_type: OpType::Query,
         root_field: "users",
-        description: "Portal users",
+        description: "Portal users with last login, enablement, suspension, and effective role",
         required_scopes: &["read:users"],
         sensitivity: Sensitivity::Identity,
         cost_hint: CostHint::Light,
@@ -267,7 +299,7 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_service_accounts.graphql"),
         op_type: OpType::Query,
         root_field: "serviceAccounts",
-        description: "API service accounts",
+        description: "API service accounts with login, rotation, expiry, enablement, and scopes",
         required_scopes: &["read:service_accounts"],
         sensitivity: Sensitivity::Identity,
         cost_hint: CostHint::Light,
@@ -278,8 +310,13 @@ pub const OPERATIONS: &[OperationDoc] = &[
         document: include_str!("../ops/list_audit_log_entries.graphql"),
         op_type: OpType::Query,
         root_field: "auditLogEntries",
-        description: "Tenant audit log entries",
+        description: "Tenant audit log entries with the acting principal, action type, \
+                      parameters, and source IP",
         required_scopes: &["admin:audit"],
+        // Left at Posture despite now naming principals: `Sensitivity`
+        // is one value, not a set, and swapping to Identity would drop
+        // the posture signal without adding one. The single-value
+        // limitation is recorded in docs/design/widening-notes.md.
         sensitivity: Sensitivity::Posture,
         cost_hint: CostHint::Heavy,
         effects: None,

@@ -1,4 +1,10 @@
-# Provisional until live introspection (see charter F1).
+# Widened 2026-08-07 (bd aae-orc-qijl). Every field added here is
+# UNVALIDATED against the live API (charter B2, F1). See
+# docs/design/widening-notes.md.
+#
+# `projectOwners` and `securityChampions` both return `[User!]!`, held
+# to id and name so ownership attribution does not drag employee email
+# into every project record.
 query ListProjects($first: Int, $after: String) {
   projects(first: $first, after: $after) {
     nodes {
@@ -7,6 +13,19 @@ query ListProjects($first: Int, $after: String) {
       slug
       description
       archived
+      businessUnit
+      projectOwners {
+        id
+        name
+      }
+      securityChampions {
+        id
+        name
+      }
+      tags {
+        key
+        value
+      }
     }
     pageInfo {
       hasNextPage

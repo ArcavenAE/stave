@@ -1,4 +1,20 @@
-# Provisional until live introspection (see charter F1).
+# Widened 2026-08-07 (bd aae-orc-qijl). Every field added here is
+# UNVALIDATED against the live API (charter B2, F1). See
+# docs/design/widening-notes.md.
+#
+# READ THE COST NOTE BEFORE RUNNING THIS AT A HIGH `--limit`.
+# `controls` and `cloudConfigurationRules` are connections, not lists,
+# and stave's pager walks the OUTER connection only. Two nested pages
+# of 100 ride on every framework in the outer page, so this document
+# fans out multiplicatively where the other eleven do not. Run it at a
+# low `--limit` against the live tenant.
+#
+# `first: 100` is a literal because the SDK binds only `$first` and
+# `$after`, and both apply to the outer connection. `totalCount` and the
+# inner `pageInfo.hasNextPage` are selected so a truncated inner page is
+# visible in the record instead of silently looking complete. A
+# framework with more than 100 controls returns a partial roster and
+# says so; nothing in stave follows the inner cursor today.
 query ListSecurityFrameworks($first: Int, $after: String) {
   securityFrameworks(first: $first, after: $after) {
     nodes {
@@ -6,6 +22,32 @@ query ListSecurityFrameworks($first: Int, $after: String) {
       name
       description
       enabled
+      controls(first: 100) {
+        totalCount
+        nodes {
+          id
+          name
+          enabled
+          severity
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+      cloudConfigurationRules(first: 100) {
+        totalCount
+        nodes {
+          id
+          name
+          enabled
+          severity
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
     }
     pageInfo {
       hasNextPage

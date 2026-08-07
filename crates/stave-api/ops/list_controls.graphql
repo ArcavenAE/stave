@@ -1,4 +1,11 @@
-# Provisional until live introspection (see charter F1).
+# Widened 2026-08-07 (bd aae-orc-qijl). Every field added here is
+# UNVALIDATED against the live API (charter B2, F1). See
+# docs/design/widening-notes.md.
+#
+# `lastRunAt` and `lastSuccessfulRunAt` are the pair runbook B9 needs to
+# substantiate that a control is not merely enabled but actually
+# running; a control enabled and failing every run reads the same as a
+# healthy one on `enabled` alone.
 query ListControls($first: Int, $after: String) {
   controls(first: $first, after: $after) {
     nodes {
@@ -6,6 +13,18 @@ query ListControls($first: Int, $after: String) {
       name
       severity
       enabled
+      lastRunAt
+      lastSuccessfulRunAt
+      serviceTickets {
+        id
+        name
+        externalId
+      }
+      securitySubCategories {
+        id
+        externalId
+        title
+      }
     }
     pageInfo {
       hasNextPage
