@@ -190,6 +190,11 @@ to answer rather than emit a false verdict (option (a), ratified).
 `ops permissions` and `auth plan` provisioning are unaffected. Root
 cause and remedy require more study. See finding-001.
 
+Scope qualifier added 2026-08-06: "largely resolved" covers field
+selections, not the read path. Every live probe so far ran at
+`--limit 2`, so each returned one page, and two paging defects lived
+below that depth until a pre-run review found them. See finding-002.
+
 Remaining: scope-qualification study, MCP transport (F3), and the
 composite-verb question (F4). `SCOPE_METADATA_PROVISIONAL` stays true.
 
@@ -202,6 +207,12 @@ queries or filter input types — deliberately not guessed at scaffold
 time); which list operations grow `filterBy` variables (server-side
 filtering vs the current client-side `stave filter`); whether
 `graphSearch` becomes a first-class verb.
+
+Evidence for the server-side filter, added 2026-08-06: while `search`
+and `--since` filter client-side they are full-connection walks by
+construction. `820a8b2` cut the request count for one such walk by
+roughly twelve times; it did not remove the walk, and no page-size
+tuning can. Only a server-side filter does. See finding-002.
 
 ### F3: MCP Live Validation
 
@@ -259,4 +270,5 @@ their weight in the SDK.
 
 | Session | Date | Outcomes |
 |---------|------|----------|
+| Live demo, hygiene, safety gate, paging fixes | 2026-08-06 | First live tenant work. 12/12 curated kinds validated read-only (`aae-orc-hzg0`). A tenant-data leak into a transcript produced the durable scrubber (`scripts/scrub.sh` with a default-deny field allowlist, shared pattern source with the detector, fail-closed on unrecognised input shapes) plus the `tenant-leak-scan` skill and a second trigger in the hygiene rule; lefthook installed and verified by planting an OCID. Added the `stave-safety-coach` subagent (Read/Grep/Glob only, CLEAR or HALT, uncertainty resolves to HALT) and its behavior-trigger rule, after confirming Wiz puts effectful operations under `type Query`. A BMAD casting call produced 20 operator runbooks (`docs/runbooks/catalogue.md`) for the F4 verb-mining exercise, tracked as bd `aae-orc-e4jo`; a pre-run review reframed that exercise around a sealed control arm and demoted execution to commissioning. Two paging defects fixed (`820a8b2`): zero-node pages ended reads, and page size was derived from `--limit` so filtering verbs walked whole connections at the limit. F1 scope-qualified, F2 gains evidence. See finding-002. |
 | Scaffold | 2026-08-05 | Repo created at ArcavenAE/stave by porting bloomctl wholesale and re-instantiating the vendor-specific 30% for the Wiz GraphQL API. Shipped: curated operation library (12 list operations, provisional field selections), SDK (OAuth client-credentials mint + XDG token cache + dc-claim endpoint derivation, client-id/secret/endpoint/registry chains, keychain custody, write-guard on mutations incl. parsed ad-hoc documents, audit v2 with api_url_source + graphql_error outcome, Wiz kind table ×12, CEL camelCase timestamp promotion), CLI (auth/registry/config/ops/api + 6 primitives + mcp family), xtask (sync-spec introspection + check-ops schema validation), synthetic Wiz fixtures + asserts + recipes, tenant-data-hygiene rule adapted to cloud-posture data, CI/signing workflows renamed. B1–B5 set, F1–F5 opened, G1–G2 ruled. |
