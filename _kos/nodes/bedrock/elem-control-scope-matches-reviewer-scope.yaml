@@ -1,0 +1,66 @@
+id: elem-control-scope-matches-reviewer-scope
+type: element
+confidence: bedrock
+title: "A control cannot police what it does not range over"
+content: |
+  Established 2026-08-07 from three defects in three independent
+  controls, all found in one day, all by probing rather than reading.
+  Stated as one rule with two faces:
+
+  **A control's exemption must key on something the control's own
+  reviewer can see.** If the reviewer is deliberately blind to a value,
+  that value cannot decide whether the control applies.
+
+  **An allowlist decides which fields travel, not what someone puts in
+  them.** Ranging over the shape of a thing is not ranging over its
+  contents.
+
+  The instances, because the rule is only as good as its evidence:
+
+  1. `runlog.sh` scrubbed by construction and its design document
+     truthfully said there was no bypass flag. The scrub exemption
+     keyed on `--in`, which sits before the `--` and is therefore
+     invisible to the safety coach by design, so `--in <scrubbed file>
+     -- stave list issue` passed the gate, ignored the stdin, reached
+     the tenant, and wrote the raw answer to `data/`. Neither feature
+     was wrong. The bypass was assembled where they met. Fixed
+     `bf76b7b`: mode comes from the verb, which is inside the reviewed
+     text.
+
+  2. `judge.sh` withholds the executor's account of itself through a
+     default-deny allowlist that survived every planted needle,
+     including a novel field and a novel entry type. It keeps
+     `command`, and must, since a judge cannot separate EXECUTOR
+     SHORTFALL from TOOL CANNOT without seeing the attempt. Free-text
+     arguments carry executor prose into the packet verbatim. Not
+     fixed; every fix breaks the field the judge most needs, so it is
+     disclosed in the packet's own instructions instead. Disclosure is
+     a legitimate terminus for this rule when the fix costs more than
+     the exposure.
+
+  3. `runlog.sh` recorded `repo_commit` from git and executed whatever
+     `stave` resolved to on `PATH`. The control ranged over the tree
+     and the risk lived in the binary. Fixed `06abc1b`.
+
+  A near-instance worth keeping because it inverts the shape:
+  `scrub.sh` rendered a populated object and a JSON null identically,
+  so the control ranged over MORE than it needed to and erased the
+  measurement it existed to protect (`30f8c21`). Over-range and
+  under-range are the same mistake about what a control covers.
+
+  Method note, load-bearing: every one of these was found by running an
+  adversarial probe, never by reading the code or the document. In each
+  case the sentence asserting the control was sound and the defect had
+  the same author, which is the ordinary case and not a criticism. A
+  reviewer reading for confirmation finds the sentence and stops.
+edges:
+  - target: question-gate-liveness
+    type: relates
+provenance:
+  created_by: human
+  session: "2026-08-07"
+  created_at: "2026-08-07"
+  evidence:
+    - finding-004-a-bypass-with-no-bypass-flag
+    - finding-005-a-gate-you-cannot-change-while-it-runs
+  open_test: "aae-orc-p3ne sweeps the remaining exemptions; a sweep that finds them all keyed correctly narrows this rule's urgency without falsifying it"

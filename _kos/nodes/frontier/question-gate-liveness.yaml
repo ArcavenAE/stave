@@ -1,0 +1,61 @@
+id: question-gate-liveness
+type: question
+confidence: frontier
+title: "Where must a gate live so it can be changed while it is running?"
+content: |
+  Opened 2026-08-07 by finding-005. The safety coach is a Claude
+  subagent defined by a file in the repo. An edit to that file does not
+  reach a coach spawned after the edit: check 4 was rewritten under
+  operator direction, committed, and the next spawn still halted under
+  the old text, confirming it when asked to read its own definition
+  from disk.
+
+  Spawning is not the reload boundary and neither is session start.
+  Two edits to the same file in one session had different fates, with
+  context compaction between them, so the working hypothesis is a
+  snapshot at session start and again at compaction. n=2, and the
+  harness is not ours to read.
+
+  The general claim:
+
+  > A control that is snapshotted cannot be hardened in response to
+  > something you learn while it is running. You can only harden it for
+  > next time.
+
+  The observed instance ran in the SAFE direction, and saying so is
+  part of the finding rather than a softening: the stale gate was the
+  stricter gate, so nothing was under-protected. The case that matters
+  is the reverse, where a session discovers a hazard, writes the rule,
+  watches the tests pass, and continues believing it is covered.
+
+  Sub-questions:
+
+  a. Can a Bash-tool hook see an argv, block it, and invoke a subagent
+     synchronously in this harness? If not, the hook shape is out.
+  b. Does a hook that spawns a subagent inherit the same snapshot, in
+     which case it solves the coverage problem and not this one?
+  c. An MCP-hosted coach can read the rule file per call. Does that
+     make the gate live, or does it move the staleness into the MCP
+     server's own startup?
+  d. What must a verdict carry so the gate is auditable after the
+     fact? A version stamp at minimum: this session only discovered
+     the skew by asking the reviewer to read its own file, which is
+     not a procedure anyone will follow twice.
+  e. What covers an ordinary interactive session with no harness at
+     all, where the only control is a behavior-trigger rule a person
+     has to remember?
+
+  Interim, available today and worse than a fix: when a session changes
+  the coach and the work continues, either restart before the next
+  tenant read or record in the runlog that the gate in force is the
+  pre-change one.
+edges:
+  - target: elem-control-scope-matches-reviewer-scope
+    type: relates
+provenance:
+  created_by: human
+  session: "2026-08-07"
+  created_at: "2026-08-07"
+  evidence:
+    - finding-005-a-gate-you-cannot-change-while-it-runs
+  tracked_as: aae-orc-9pe1
