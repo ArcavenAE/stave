@@ -376,6 +376,24 @@ and how much rides on it:
    would have been. `sourceDeployments` and the system-health counts are
    the least certain, because they replace `CloudAccount.status` with a
    differently shaped signal rather than the same one under a new name.
+
+   *Worked 2026-08-07. Three settled, three blocked, one not attempted.*
+
+   | Deprecated → successor | Result |
+   |---|---|
+   | `Issue.control` → `sourceRules` | **populated 20/20.** The strongest of the seven |
+   | `VulnerabilityFinding.ignoreRules` → `selectedIgnoreRules` | key arrives, null 20/20. Recorded as "resolves, tenant empty" and **not** as a failed substitution: an ignore rule is an operator action on specific findings, so its absence across twenty arbitrary findings is the expected shape |
+   | `AuditLogEntry.user`/`.serviceAccount` → `performer` | **cannot be evaluated.** The key does not arrive — finding-006 |
+   | `CloudAccount.status` → `criticalSystemHealthIssueCount`, `highSystemHealthIssueCount` | **cannot be evaluated.** Neither key arrives — finding-006 |
+   | `CloudAccount.connector` → `sourceDeployments` | **cannot be evaluated.** Key does not arrive — finding-006 |
+   | `User.role` → `effectiveRole` | not attempted |
+
+   The three that settled cost no tenant calls at all; they fell out of
+   data the run had already collected. The three that are blocked are
+   blocked by the same thing, and it is neither the substitution nor the
+   tenant: see `_kos/findings/finding-006-the-server-answers-a-subset-of-what-was-asked.md`
+   and bd `aae-orc-i8cj`. Until that settles, a substitution whose key
+   does not arrive tells us nothing about the substitution.
 5. **The joined scopes.** Whether the nested-field permission model
    exists at all, before whether the names are right.
 6. **The exposure-boolean question** under type surprises. If

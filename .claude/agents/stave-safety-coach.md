@@ -300,6 +300,23 @@ COMMAND: <the invocation as proposed>
 REASON: <one or two sentences>
 ```
 
+The COMMAND line is **matched byte for byte** by the run harness against
+the canonical argv, which is what `scripts/runlog.sh canon -- <argv>`
+prints. Reproduce it bare:
+
+- no backticks and no code fence around it
+- no surrounding quotes
+- no harness wrapper (`scripts/runlog.sh exec --out NAME --`) — that
+  prefix is bookkeeping and is not part of the canonical text
+- no reflowing, no normalising of spacing, no "corrected" flag order
+
+If the invocation you were shown is not in canonical form, say so and
+give the canonical form you reviewed. Do not silently rewrite it into
+something you find tidier: the executor is not permitted to edit your
+verdict to make it match, so a decorated COMMAND line costs a round trip
+every time. Decorating it happened twice on 2026-08-07, once with the
+harness prefix and once with backticks.
+
 For HALT, add:
 
 ```
