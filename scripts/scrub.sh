@@ -177,6 +177,13 @@ field_layer() {
             . + { ($k):
                   ( if ($safe | index($k)) or ($extra | index($k))
                     then ($in[$k] | scrub($safe; $extra))
+                    # A null is not tenant data. Rendering it as
+                    # "<redacted:field>" made absent and populated
+                    # byte-identical, which erased the only question the
+                    # live-validation queue asks: is this field
+                    # populated. Discloses nothing; the value is still
+                    # gone in every non-null case.
+                    elif $in[$k] == null then null
                     else "<redacted:\($k)>"
                     end ) })
       elif type == "array" then map(scrub($safe; $extra))
@@ -480,6 +487,42 @@ selftest() {
     printf 'ok   %-28s\n' "positive control: kept"
   else
     printf 'FAIL %-28s safe fields were destroyed: %s\n' "positive control" "$kept" >&2
+    fail=1
+  fi
+
+  # Null survives as null, and nothing else does. A null carries no
+  # tenant data, and rendering it as "<redacted:field>" made absent and
+  # populated byte-identical, which erased the only question the
+  # live-validation queue asks. Found 2026-08-07 when the first real
+  # validation call could not tell an unpopulated vulnerableAsset from a
+  # populated one.
+  local nulls
+  nulls="$(printf '%s\n' '{"_kind":"issue","assignee":null,"sourceIP":null,"name":"box","projects":[],"scopes":"","performer":false,"entitySnapshot":{"name":null}}' | run_scrub)"
+  if printf '%s' "$nulls" | grep -q '"assignee":null' \
+    && printf '%s' "$nulls" | grep -q '"sourceIP":null'; then
+    printf 'ok   %-28s\n' "null: absence survives as null"
+  else
+    printf 'FAIL %-28s null was not preserved: %s\n' "null: absence survives" "$nulls" >&2
+    fail=1
+  fi
+  # The negative half, and the more important one: only a literal null
+  # takes that path. An empty array, an empty string, false, and a real
+  # string all stay redacted, because an array length or an
+  # empty-versus-absent distinction on a real value is a signal about
+  # the tenant. `entitySnapshot` is an ALLOWED container, so it is
+  # descended into rather than redacted whole, and a null denied field
+  # inside it stays null for the same reason it does at the top level.
+  # The first draft of this test asserted entitySnapshot was redacted
+  # whole, and the test caught the author rather than the scrubber.
+  if printf '%s' "$nulls" | grep -q '"projects":"<redacted' \
+    && printf '%s' "$nulls" | grep -q '"scopes":"<redacted' \
+    && printf '%s' "$nulls" | grep -q '"performer":"<redacted' \
+    && printf '%s' "$nulls" | grep -q '"name":"<redacted' \
+    && ! printf '%s' "$nulls" | grep -q '"box"' \
+    && printf '%s' "$nulls" | grep -q '"entitySnapshot":{"name":null}'; then
+    printf 'ok   %-28s\n' "null: only null takes that path"
+  else
+    printf 'FAIL %-28s a non-null took the null path: %s\n' "null: only null" "$nulls" >&2
     fail=1
   fi
 
