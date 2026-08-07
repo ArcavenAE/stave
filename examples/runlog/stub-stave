@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# stub-stave: a stand-in for the stave binary, for the runlog worked
+# example and for anyone exercising the harness without a tenant.
+#
+# It answers a handful of invocations with synthetic records and writes
+# synthetic audit lines in the real schema so the runlog-to-audit join
+# has something to join on. It opens no connection and reads no config.
+#
+# The records deliberately carry a person's name, an ARN, an email, and
+# a resource name, so the example shows the scrubber doing its work
+# rather than merely running.
+
+set -euo pipefail
+
+audit() { # $1 operation id, $2 items
+  [[ -n "${STAVE_AUDIT_DIR:-}" ]] || return 0
+  mkdir -p "$STAVE_AUDIT_DIR"
+  local trace
+  trace="0198a2c1-7f3e-7c21-9b04-$(printf '%012d' "$((RANDOM * RANDOM % 999999999))")"
+  jq -nc --arg t "$trace" --arg s "${STAVE_SESSION_ID:-}" --arg op "$1" --argjson n "$2" \
+    '{schema_version: 3, trace_id: $t, span_id: $t, parent_span_id: null,
+      ts_start: (now | todate), duration_ms: 41,
+      invocation: {argv: ["stave"], binary_version: "0.1.0-stub",
+                   host: "example-host", user: "operator", tty: false,
+                   auth_source: "keyring", api_url_source: "derived",
+                   session_id: $s},
+      verb_phase: "list", synthesis_keys: ["id"],
+      operation: {id: $op, method: "query", url_template: "issuesV2",
+                  path_params: {first: 50, after: null}, query_params: {}},
+      response: {status: 200, size_bytes: 2048, items_returned: $n},
+      result: "ok", redacted_fields: ["authorization"]}' \
+    >> "$STAVE_AUDIT_DIR/$(date -u +%Y-%m-%d).jsonl"
+}
+
+case "${1:-}${2:+ $2}" in
+  "list issue")
+    audit list_issues 3
+    cat <<'JSONL'
+{"_kind":"issue","id":"iss-0001","severity":"CRITICAL","status":"OPEN","createdAt":"2026-06-02T09:14:00Z","entitySnapshot":{"type":"USER_ACCOUNT","cloudPlatform":"AWS","id":"arn:aws:iam::123456789012:role/PaymentsDeploy","name":"Jane Q Example"}}
+{"_kind":"issue","id":"iss-0002","severity":"HIGH","status":"OPEN","createdAt":"2026-07-19T22:03:00Z","entitySnapshot":{"type":"VIRTUAL_MACHINE","cloudPlatform":"AWS","id":"i-0abc123","name":"prod-db-primary"}}
+{"_kind":"issue","id":"iss-0003","severity":"HIGH","status":"RESOLVED","createdAt":"2026-07-30T11:41:00Z","entitySnapshot":{"type":"BUCKET","cloudPlatform":"GCP","id":"projects/example-project-dev/buckets/backups","name":"finance-backups"}}
+JSONL
+    ;;
+  "filter --where")
+    # A stream transform: reads the already-scrubbed stream on stdin.
+    jq -c 'select(.status == "OPEN")'
+    ;;
+  "list user")
+    audit list_users 1
+    printf '{"_kind":"user","id":"usr-1","email":"jane.example@example-corp.com","name":"Jane Q Example"}\n'
+    ;;
+  *)
+    printf 'stub-stave: unsupported invocation: %s\n' "$*" >&2
+    exit 9
+    ;;
+esac

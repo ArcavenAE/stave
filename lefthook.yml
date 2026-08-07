@@ -5,6 +5,8 @@ pre-commit:
       run: scripts/check-tenant-leaks.sh --staged
     scrub-selftest:
       run: scripts/scrub.sh --selftest
+    runlog-selftest:
+      run: scripts/runlog.sh selftest
     fmt:
       run: cargo +nightly fmt --all -- --check
     clippy:

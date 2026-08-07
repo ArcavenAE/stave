@@ -48,13 +48,19 @@ ci: check-fmt check-clippy build check-deny test test-doc check-ops hygiene
 
 # ─── Tenant Hygiene ────────────────────────────────────
 
-# Both halves of the leak tooling. Synthetic values only; no tenant,
-# no credentials, no network.
-hygiene: scrub-selftest check-leaks
+# Both halves of the leak tooling, plus the run harness that composes
+# with them. Synthetic values only; no tenant, no credentials, no
+# network, and the stave binary is never invoked.
+hygiene: scrub-selftest runlog-selftest check-leaks
 
 # Prove every scrub rule still fires, and that safe fields survive.
 scrub-selftest:
     scripts/scrub.sh --selftest
+
+# Prove the run harness scrubs by construction and refuses to execute an
+# invocation with no matching CLEAR verdict.
+runlog-selftest:
+    scripts/runlog.sh selftest
 
 # Scan the tracked tree for tenant-identifying data (block tier).
 check-leaks:

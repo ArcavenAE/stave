@@ -7,6 +7,11 @@
 # Local audit-trail JSONL (developer machine only — see docs/audit-trail-format.md)
 /.stave-audit/
 
+# Run-harness working directories. Each one holds an unscrubbed audit
+# trail written by stave itself; runlog.sh also drops a `*` .gitignore
+# inside every run dir. See docs/design/runlog-harness.md.
+/runs/
+
 # IDE
 .idea/
 .vscode/

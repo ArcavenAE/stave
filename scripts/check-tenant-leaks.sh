@@ -52,10 +52,22 @@ files() {
 
 # Text files only; skip the vendored spec (vendor-published, uses
 # placeholder servers) and this script itself.
-# The hygiene scripts hold the patterns themselves plus synthetic
-# selftest values, so they are excluded from their own scan.
+#
+# The rest of the exclusions share one criterion, and it is narrow: a
+# file belongs here only if its JOB is to hold synthetic instances of
+# the forbidden shapes. The hygiene scripts carry the patterns plus
+# their own selftest values; `runlog.sh` plants a name, a resource name
+# and an ARN and asserts none of them survive; `stub-stave` is the
+# fixture it plants them from. A test that proves an ARN gets scrubbed
+# has to contain something ARN-shaped, and rewriting the fixture to dodge
+# this scan would hide the shape from the detector while still exercising
+# it, which is worse than the exemption.
+#
+# The list is paths and not a self-declared marker on purpose. Adding one
+# is a reviewable edit to a security control. A marker would let any new
+# file exempt itself.
 scan_list() {
-  files | grep -vE '^(spec/|target/|scripts/(check-tenant-leaks|scrub|leak-patterns)\.sh$)' || true
+  files | grep -vE '^(spec/|target/|scripts/(check-tenant-leaks|scrub|leak-patterns|runlog)\.sh$|examples/runlog/stub-stave$)' || true
 }
 
 fail=0
