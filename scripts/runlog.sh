@@ -186,13 +186,14 @@ append_entry() {
 # ---------------------------------------------------------------------
 
 cmd_init() {
-  local runbook="" dir="" sid="" audit=""
+  local runbook="" dir="" sid="" audit="" skew_ok=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --runbook) runbook="${2:?}"; shift 2 ;;
       --run-dir) dir="${2:?}"; shift 2 ;;
       --session-id) sid="${2:?}"; shift 2 ;;
       --audit-dir) audit="${2:?}"; shift 2 ;;
+      --allow-skew) skew_ok=1; shift ;;
       *) die "init: unknown argument: $1" ;;
     esac
   done
@@ -226,9 +227,78 @@ EOF
   : > "$RUN_DIR/runlog.jsonl"
   printf '0' > "$RUN_DIR/state/seq"
 
-  jq -n --arg sv "$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+  # Which binary, and does it match the tree we are recording?
+  #
+  # Commissioning run 1 (2026-08-07) ran /opt/homebrew/bin/stave at
+  # alpha-20260806-120101-81df3bc against a tree at 98249c3, so the
+  # fields the qijl widening had added were selected by the documents on
+  # disk and absent from every record. The runlog said repo_commit
+  # 98249c3, which made it an actively misleading record rather than an
+  # incomplete one: every conclusion about what the tool can reach would
+  # have been attributed to the wrong document set, and the judges'
+  # surface.md describes the TREE's documents.
+  #
+  # So: record the binary's own identity, and refuse when the two
+  # disagree. `stave --version` is on the coach's own fast path, which is
+  # why it can run here without a verdict.
+  local bin_path bin_ver bin_sha tree_sha bin_dirty=0 skew_reason=""
+  bin_path="$(command -v "$STAVE_BIN_NAME" 2>/dev/null || true)"
+  [[ -n "$bin_path" ]] || die "init: no '$STAVE_BIN_NAME' on PATH" "$EX_STATE"
+  bin_ver="$("$bin_path" --version 2>/dev/null | head -1 || true)"
+  [[ -n "$bin_ver" ]] || bin_ver="unknown"
+  tree_sha="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+  # Two version shapes ship: `alpha-<stamp>-<sha7>` from the release
+  # channel and `dev+g<sha7>[-dirty]` from a local build. Take the last
+  # run of 7-or-more hex characters, which is the sha in both.
+  bin_sha="$(printf '%s' "$bin_ver" | grep -oE '[0-9a-f]{7,}' | tail -1 || true)"
+  [[ "$bin_ver" == *dirty* ]] && bin_dirty=1
+
+  if [[ "$bin_dirty" -eq 1 ]]; then
+    # A dirty build corresponds to NO commit, and build.rs does not
+    # re-run on every HEAD move, so the sha inside a dev version is not
+    # trustworthy either. Fall back to something that does not depend on
+    # the binary's self-report: is any source file newer than the binary?
+    local newest
+    newest="$(find "$REPO_ROOT/crates" "$REPO_ROOT/spec" -type f -newer "$bin_path" -print -quit 2>/dev/null || true)"
+    [[ -n "$newest" ]] && skew_reason="a source file changed after this binary was built: ${newest#"$REPO_ROOT"/}"
+  elif [[ "$bin_sha" == "" ]]; then
+    skew_reason="the binary's version string names no commit: $bin_ver"
+  elif [[ "$tree_sha" != "unknown" && "$bin_sha" != "$tree_sha"* && "$tree_sha" != "$bin_sha"* ]]; then
+    skew_reason="the binary was built from $bin_sha; the tree is at $tree_sha"
+  fi
+
+  if [[ -n "$skew_reason" && "$skew_ok" -ne 1 ]]; then
+    cat >&2 <<EOF
+runlog.sh: refusing to start. The binary and the tree disagree.
+
+  binary   $bin_path
+           $bin_ver
+  tree     $tree_sha
+
+  $skew_reason
+
+A run records repo_commit from the tree and executes whatever \`stave\`
+PATH resolves to. When those differ, every finding about what the tool
+can reach is attributed to the wrong document set, and the judges'
+surface.md describes the tree's documents rather than the ones that ran.
+
+Build the tree's binary and put it first on PATH, or pass --allow-skew if
+the skew is the point of the run. --allow-skew records the mismatch in
+run_start; it does not hide it.
+EOF
+    exit "$EX_STATE"
+  fi
+
+  jq -n --arg sv "$tree_sha" --arg bp "$bin_path" --arg bv "$bin_ver" \
+        --argjson skew "$([[ "$skew_ok" -eq 1 ]] && echo true || echo false)" \
+        --argjson dirty "$([[ "$bin_dirty" -eq 1 ]] && echo true || echo false)" \
+        --arg sr "$skew_reason" \
         --arg audit "$AUDIT_DIR" --arg run_dir "$RUN_DIR" '
-    {repo_commit: $sv, audit_dir: $audit, run_dir: $run_dir}
+    {repo_commit: $sv, binary_path: $bp, binary_version: $bv,
+     binary_dirty: $dirty, skew_allowed: $skew,
+     skew_reason: (if $sr == "" then null else $sr end),
+     audit_dir: $audit, run_dir: $run_dir}
   ' | append_entry run_start
 
   cat <<EOF
@@ -906,6 +976,12 @@ selftest() {
   cat > "$root/bin/stave" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
+# --version first, and before the ran-marker: init calls it to identify
+# the binary, and that is bookkeeping rather than an executed invocation.
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'stave 0.0.1 (alpha-selftest-%s)\n' "${STUB_VERSION_SHA:-0000000}"
+  exit 0
+fi
 printf 'ran\n' >> "${STUB_RAN_MARKER:?}"
 mkdir -p "${STAVE_AUDIT_DIR:?}"
 trace="0198a2c1-7f3e-7c21-9b04-$(printf '%012d' "$(( RANDOM * RANDOM % 999999999 ))")"
@@ -935,7 +1011,25 @@ STUB
   : > "$STUB_RAN_MARKER"
 
   local rd="$root/run"
-  "$0" init --runbook A1 --run-dir "$rd" >/dev/null
+  # 0. A binary whose version does not name the tree's commit is refused,
+  #    and no run directory survives. Commissioning run 1 spent a real
+  #    tenant read before anyone noticed the skew.
+  rc=0
+  STUB_VERSION_SHA=deadbee "$0" init --runbook A1 --run-dir "$root/skew" >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" -eq "$EX_STATE" ]]; then
+    ok_ "version: a binary that does not match the tree is refused"
+  else
+    bad_ "version: a binary that does not match the tree is refused" "rc=$rc"
+  fi
+  rm -rf "$root/skew"
+
+  # The stub is not stave, so the rest of the selftest runs under the
+  # documented escape rather than by faking a matching version.
+  "$0" init --runbook A1 --run-dir "$rd" --allow-skew >/dev/null
+  jq -e 'select(.type=="run_start") | .skew_allowed == true and (.binary_version | test("alpha-selftest"))' \
+    < "$rd/runlog.jsonl" >/dev/null \
+    && ok_ "version: binary identity and the skew waiver are recorded" \
+    || bad_ "version: binary identity and the skew waiver are recorded"
   export STAVE_RUNLOG_DIR="$rd"
 
   coach() { # $1 verdict, $2 command, [$3 doubt]

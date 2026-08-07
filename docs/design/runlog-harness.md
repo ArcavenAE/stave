@@ -70,6 +70,43 @@ gitignore inside every run directory. Both, because the audit trail in
 `audit/` is stave's own output: the scrubber never sees it, and it
 carries GraphQL variables, cursors, hostname, and username.
 
+## The binary the run actually uses
+
+`init` refuses to start when the binary on `PATH` disagrees with the
+tree, because a run records `repo_commit` from git and executes whatever
+`stave` resolves to, and nothing was checking that those were the same
+thing.
+
+Commissioning run 1 (2026-08-07) is why. It ran
+`/opt/homebrew/bin/stave` at `alpha-20260806-120101-81df3bc` against a
+tree at `98249c3`, so `assignee` and `serviceTickets` were selected by
+the documents on disk and absent from all 25 records. The runlog said
+`repo_commit 98249c3`. That is worse than an incomplete record: every
+conclusion about what the tool can reach would have been filed against
+the wrong document set, and the judges' `surface.md` describes the
+TREE's documents. The run was abandoned and is kept.
+
+Three cases, and the third is the one that matters:
+
+| Version shape | Check |
+|---|---|
+| `alpha-<stamp>-<sha7>` | the sha must be the tree's `HEAD` |
+| no sha at all | refuse. Unknown provenance is not a pass |
+| `dev+g<sha7>-dirty` | the sha is untrustworthy (`build.rs` does not re-run on every `HEAD` move; a fresh build here reported a sha three commits stale), so fall back to mtime: refuse if any file under `crates/` or `spec/` is newer than the binary |
+
+The dirty case is the common one, since running the tree's own build is
+the correct thing to do, and it is exactly the case a sha comparison
+cannot police. The mtime check does not depend on the binary's
+self-report at all, which is the property worth having.
+
+`--allow-skew` exists and records `skew_allowed: true` plus the reason in
+`run_start`. It does not hide the mismatch.
+
+`stave --version` is on the coach's own fast path (provably offline),
+which is why `init` may call it without a verdict.
+
+---
+
 `init` prints the one export the rest of the run needs:
 
 ```sh
