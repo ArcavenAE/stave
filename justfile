@@ -44,7 +44,21 @@ fmt:
 
 # ─── CI Mirror ─────────────────────────────────────────
 
-ci: check-fmt check-clippy build check-deny test test-doc check-ops
+ci: check-fmt check-clippy build check-deny test test-doc check-ops hygiene
+
+# ─── Tenant Hygiene ────────────────────────────────────
+
+# Both halves of the leak tooling. Synthetic values only; no tenant,
+# no credentials, no network.
+hygiene: scrub-selftest check-leaks
+
+# Prove every scrub rule still fires, and that safe fields survive.
+scrub-selftest:
+    scripts/scrub.sh --selftest
+
+# Scan the tracked tree for tenant-identifying data (block tier).
+check-leaks:
+    scripts/check-tenant-leaks.sh --all
 
 # ─── Spec / Codegen ────────────────────────────────────
 

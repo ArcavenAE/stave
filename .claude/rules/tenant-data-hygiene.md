@@ -10,7 +10,56 @@ accounts, their resources, and their unremediated weaknesses. A leak
 here is not a style problem — it is publishing a targeting map of a
 production environment to anyone who reads a public repo.
 
-## The trigger
+## Trigger 1 (the earlier one): you are about to READ tenant output
+
+Before running any `stave` command whose output lands in a terminal, a
+transcript, a chat window, an issue draft, or an agent's context:
+
+**pipe it through `scripts/scrub.sh`.**
+
+```sh
+stave list issue --limit 50 | scripts/scrub.sh
+stave list control --limit 50 | scripts/scrub.sh --catalog   # keeps vendor names
+stave api --query "$doc" 2>&1 | scripts/scrub.sh             # errors leak too
+```
+
+The trigger fires on the *pipeline you are composing*, not on the file
+you are saving. If the command produces tenant records and you have not
+typed `| scripts/scrub.sh`, stop and add it.
+
+Applies equally to: `jq` over stave output, `head`/`tail` of an audit
+line, `cat` of a saved response, and any `--limit 1` you tell yourself
+is "just to check the shape." One record is one real person or one real
+resource.
+
+Read raw only when you have a specific reason to see an identifier, and
+then keep it inside the terminal: no file, no commit, no paste, no
+issue body.
+
+### Why this trigger comes first
+
+Trigger 2 below is enforced by a pre-commit hook and CI. This one has
+**no backstop at all**. Once tenant data is in a transcript it has
+already left the machine's control, and there is nothing left to block.
+No hook runs on your eyes, your scrollback, or a model's context
+window.
+
+Measured 2026-08-06, during the first live demo attempt: an agent ran
+`stave list issue --limit 3 | stave enrich --with severity-roll-up`
+with no scrubber and printed a person's full name, a GCP project and
+service-account email, and an OCI compartment OCID into a session
+transcript. The scrubber for that session existed, in a scratch
+directory, and was simply not in the pipe. Nothing was committed, and
+the commit hook would not have fired if it had been, because no commit
+was involved. That is the whole gap in one sentence.
+
+Note what the regex tier could not have caught: the person's name. It
+has no shape. `scrub.sh` catches it because `entitySnapshot.name` is
+absent from a default-deny field allowlist, not because it looked
+dangerous. This is why the answer is the scrubber and not a sharper
+pattern.
+
+## Trigger 2: you are about to WRITE to a durable channel
 
 You are about to put text into a **durable, shareable channel** — a git
 commit message, a file being committed, a `gh issue`/`gh pr` body or
@@ -63,10 +112,23 @@ Also stop when you're about to:
 
 ## Backstops (defense in depth — not a substitute for the rule)
 
-- `scripts/check-tenant-leaks.sh` runs in pre-commit (lefthook) + CI.
-  Generic patterns are in-repo; tenant literals (the tenant ID, the
-  region hostname) go in a **gitignored** `.leak-patterns.local`
-  (create one per machine that touches a real tenant).
+- `scripts/scrub.sh` is the TRANSFORM (trigger 1). Field allowlist over
+  stave JSONL plus structural patterns over any text.
+  `scripts/scrub.sh --selftest` proves every rule fires, using
+  synthetic values only, and needs no tenant.
+- `scripts/check-tenant-leaks.sh` is the DETECTOR (trigger 2), run by
+  pre-commit (lefthook) and CI.
+- Both read `scripts/leak-patterns.sh`, so a pattern added once is
+  scrubbed and blocked in the same commit. Rules are tiered: `block`
+  shapes have zero benign occurrences in the tree and stop a commit;
+  `scrub` shapes (GUID, bare account id, IP, email) are neutralised in
+  output but never block, because they occur legitimately in synthetic
+  fixtures and tests. Promote a rule to `block` only after measuring
+  zero benign hits.
+- Tenant literals (the tenant ID, the region hostname) go in a
+  **gitignored** `.leak-patterns.local`, one fixed string per line.
+  Create one on every machine that touches a real tenant; the scrubber
+  and the detector both pick it up automatically.
 - GitHub secret scanning + push protection are enabled on the repo.
 - Fixtures are synthetic **by policy** (`examples/README.md`).
 

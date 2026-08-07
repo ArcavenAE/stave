@@ -12,7 +12,13 @@ live tenant by default. Third sibling of sidestep and bloomctl.
 > credentials/secrets (client secrets, tokens, registry passwords), or
 > raw audit-trail lines into git commits, `gh` issues/PRs, discussions,
 > or any shared log. Sanitize first.
+>
+> **Pipe tenant output through the scrubber before you read it:**
+> `stave list issue --limit 50 | scripts/scrub.sh`. The commit hook
+> guards git; nothing guards a transcript, so the scrubber has to be in
+> the pipe rather than applied afterwards.
 > Full rule: `.claude/rules/tenant-data-hygiene.md`.
+> Procedure before publishing: the `tenant-leak-scan` skill.
 
 @charter.md
 @.claude/rules/_index.md

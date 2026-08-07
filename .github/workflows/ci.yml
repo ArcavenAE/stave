@@ -151,3 +151,8 @@ jobs:
           persist-credentials: false
       - name: Scan tree for tenant-identifying data
         run: scripts/check-tenant-leaks.sh --all
+      # The detector and the scrubber share scripts/leak-patterns.sh.
+      # The selftest is what stops a pattern from silently stopping to
+      # match; it uses synthetic values and needs no tenant.
+      - name: Prove the scrubber still redacts
+        run: scripts/scrub.sh --selftest

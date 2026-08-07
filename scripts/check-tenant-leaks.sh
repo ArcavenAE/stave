@@ -19,24 +19,21 @@
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+# Patterns live in one place so the detector and scripts/scrub.sh
+# cannot drift apart. This script enforces the `block` tier only; the
+# scrubber applies every tier. See scripts/leak-patterns.sh for why.
+# shellcheck source=scripts/leak-patterns.sh
+source scripts/leak-patterns.sh
 
 MODE="${1:---staged}"
 
-# Placeholder region/tenant tokens that are allowed to appear with real
-# host suffixes (docs, vendor examples, tests).
-PLACEHOLDERS='<region>|region|your-region|example'
+PLACEHOLDERS="$LEAK_PLACEHOLDERS"
 
-# Generic patterns (ERE). Safe to publish — they describe *shapes*,
-# not values.
-GENERIC_PATTERNS=(
-  # UUID-shaped bearer tokens in pasted commands/output
-  'Bearer [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}'
-  # Region-bearing Wiz API hostnames that are not known placeholders
-  # (the region narrows the tenant; docs use api.<region>.app.wiz.io)
-  'https://api\.[a-z]{2,4}[0-9]{1,3}\.app\.wiz\.io'
-  # Registry usernames embed the tenant ID
-  'wizio-repo-[0-9a-f-]{8,}'
-)
+# Blocking-tier patterns, PCRE, from the shared module.
+GENERIC_PATTERNS=()
+while IFS= read -r _p; do
+  [[ -n "$_p" ]] && GENERIC_PATTERNS+=("$_p")
+done < <(leak_blocking_patterns)
 
 files() {
   case "$MODE" in
@@ -55,16 +52,22 @@ files() {
 
 # Text files only; skip the vendored spec (vendor-published, uses
 # placeholder servers) and this script itself.
+# The hygiene scripts hold the patterns themselves plus synthetic
+# selftest values, so they are excluded from their own scan.
 scan_list() {
-  files | grep -vE '^(spec/|target/|scripts/check-tenant-leaks\.sh$)' || true
+  files | grep -vE '^(spec/|target/|scripts/(check-tenant-leaks|scrub|leak-patterns)\.sh$)' || true
 }
 
 fail=0
 matches() {
-  # $1 = pattern (ERE), $2.. = files
+  # $1 = pattern (PCRE), $2.. = files
   local pattern="$1"; shift
   [ "$#" -eq 0 ] && return 0
-  grep -nE "$pattern" -- "$@" 2>/dev/null \
+  PAT="$pattern" perl -ne '
+    BEGIN { $re = qr/$ENV{PAT}/ }
+    print "$ARGV:$.: $_" if /$re/;
+    close ARGV if eof;
+  ' -- "$@" 2>/dev/null \
     | grep -vE "https://api\.(${PLACEHOLDERS})\." \
     || true
 }
