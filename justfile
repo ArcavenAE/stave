@@ -51,7 +51,7 @@ ci: check-fmt check-clippy build check-deny test test-doc check-ops hygiene
 # Both halves of the leak tooling, plus the run harness that composes
 # with them. Synthetic values only; no tenant, no credentials, no
 # network, and the stave binary is never invoked.
-hygiene: scrub-selftest runlog-selftest check-leaks
+hygiene: scrub-selftest runlog-selftest judge-selftest check-leaks
 
 # Prove every scrub rule still fires, and that safe fields survive.
 scrub-selftest:
@@ -61,6 +61,11 @@ scrub-selftest:
 # invocation with no matching CLEAR verdict.
 runlog-selftest:
     scripts/runlog.sh selftest
+
+# Prove the judge packet withholds the executor's account of itself, and
+# that a verdict cannot attribute a gap without naming what it turns on.
+judge-selftest:
+    scripts/judge.sh selftest
 
 # Scan the tracked tree for tenant-identifying data (block tier).
 check-leaks:
