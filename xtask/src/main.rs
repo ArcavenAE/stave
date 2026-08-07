@@ -53,6 +53,53 @@ const REGISTRY_REL_PATH: &str = "crates/stave-api/src/lib.rs";
 /// from SDL, so the checker seeds them as known leaf types.
 const BUILT_IN_SCALARS: &[&str] = &["String", "Int", "Float", "Boolean", "ID"];
 
+/// Fields no curated document may select, enforced at build time.
+///
+/// Selecting a field on a `Query` is normally inert. These are not. They
+/// mint egress artifacts or return live credentials as a side effect of
+/// being selected, and the SDK write guard passes every one of them
+/// because it classifies a document by its operation type and these are
+/// all queries.
+///
+/// The safety coach reviews ad-hoc `--query` documents against an
+/// allowlist of ROOT fields, so a nested selection under an allowed root
+/// (`issuesV2 { exportUrl }`) satisfies the rule as written. That gate
+/// held when tested, but on the reviewing model generalising well rather
+/// than on any rule naming the class. This table does not depend on
+/// anyone reasoning correctly under time pressure, and unlike the coach
+/// it also covers the curated documents, which the coach fast-paths past.
+///
+/// A type of `*` denies the field on every type that carries it.
+///
+/// See bd `aae-orc-e4uf` and
+/// `docs/design/verb-baseline-vendor-surface.md`, which found it.
+const DENIED_SELECTIONS: &[(&str, &str, &str)] = &[
+    (
+        "*",
+        "exportUrl",
+        "mints a server-side export artifact and returns a URL; 26 connection types carry it, \
+         five of them behind curated roots",
+    ),
+    (
+        "ReportRun",
+        "url",
+        "pre-signed download link; selecting it turns a read into an egress channel",
+    ),
+    (
+        "ServiceAccount",
+        "clientSecret",
+        "live credential; would reach stdout and the audit trail",
+    ),
+];
+
+/// Returns the reason a selection is denied, if it is.
+fn denied_selection(type_name: &str, field_name: &str) -> Option<&'static str> {
+    DENIED_SELECTIONS
+        .iter()
+        .find(|(ty, field, _)| *field == field_name && (*ty == "*" || *ty == type_name))
+        .map(|(_, _, why)| *why)
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "xtask", about = "Developer tasks for stave")]
 struct Cli {
@@ -1024,6 +1071,14 @@ impl Checker<'_, '_> {
             match selection {
                 Selection::Field(f) if f.name == "__typename" => {}
                 Selection::Field(f) => {
+                    if let Some(why) = denied_selection(type_name, &f.name) {
+                        self.problem(format!(
+                            "{path}.{}: selecting {type_name}.{} is denied: {why}",
+                            f.name, f.name
+                        ));
+                        continue;
+                    }
+
                     let Some(field_def) = fields.iter().find(|d| d.name == f.name) else {
                         self.problem(format!(
                             "{path}.{}: type {type_name} has no such field",
@@ -1366,9 +1421,11 @@ mod tests {
     const TEST_SCHEMA: &str = r#"
 schema { query: Query mutation: Mutation }
 scalar DateTime
-type Query { issuesV2(first: Int, after: String): IssueConnection }
+type Query { issuesV2(first: Int, after: String): IssueConnection serviceAccounts(first: Int): ServiceAccountConnection }
 type Mutation { deleteReport(id: ID!): Boolean }
-type IssueConnection { nodes: [Issue!] pageInfo: PageInfo! }
+type IssueConnection { nodes: [Issue!] pageInfo: PageInfo! exportUrl(format: String, limit: Int): String }
+type ServiceAccountConnection { nodes: [ServiceAccount!] pageInfo: PageInfo! }
+type ServiceAccount { id: ID! clientId: String! clientSecret: String! scopes: [String!]! }
 type PageInfo { hasNextPage: Boolean! endCursor: String }
 type Issue { id: ID! createdAt: DateTime entity: Entity old: String @deprecated(reason: "gone") }
 union Entity = Issue | PageInfo
@@ -1385,6 +1442,85 @@ union Entity = Issue | PageInfo
             op_type: "query".to_string(),
             root_field: root_field.to_string(),
         }
+    }
+
+    #[test]
+    fn denies_export_url_under_an_allowed_root() {
+        // The root field is allowed and the whole document is a query, so
+        // neither the write guard nor the coach's root-field allowlist
+        // stops this. The deny-list is the only thing that does.
+        let outcome = run_check(
+            r#"query OpenIssues($first: Int) {
+                 issuesV2(first: $first) {
+                   nodes { id }
+                   pageInfo { hasNextPage endCursor }
+                   exportUrl(format: "CSV", limit: 5000)
+                 }
+               }"#,
+            Some(query_entry("issuesV2")),
+        );
+        assert!(
+            outcome
+                .problems
+                .iter()
+                .any(|p| p.contains("exportUrl") && p.contains("denied")),
+            "exportUrl must be denied, got: {:?}",
+            outcome.problems
+        );
+    }
+
+    #[test]
+    fn denies_client_secret_on_service_account() {
+        let outcome = run_check(
+            r#"query ListServiceAccounts($first: Int) {
+                 serviceAccounts(first: $first) {
+                   nodes { id clientId clientSecret }
+                   pageInfo { hasNextPage endCursor }
+                 }
+               }"#,
+            Some(query_entry("serviceAccounts")),
+        );
+        assert!(
+            outcome
+                .problems
+                .iter()
+                .any(|p| p.contains("clientSecret") && p.contains("denied")),
+            "clientSecret must be denied, got: {:?}",
+            outcome.problems
+        );
+    }
+
+    #[test]
+    fn allows_the_sibling_fields_of_a_denied_one() {
+        // The deny-list must not be so blunt that it blocks the widening
+        // work it sits beside. `scopes` is the field aae-orc-8af5 wants,
+        // on the same type that carries `clientSecret`.
+        let outcome = run_check(
+            r#"query ListServiceAccounts($first: Int) {
+                 serviceAccounts(first: $first) {
+                   nodes { id clientId scopes }
+                   pageInfo { hasNextPage endCursor }
+                 }
+               }"#,
+            Some(query_entry("serviceAccounts")),
+        );
+        assert!(
+            outcome.problems.is_empty(),
+            "expected no problems, got: {:?}",
+            outcome.problems
+        );
+    }
+
+    #[test]
+    fn denied_selection_matches_wildcard_and_exact_type() {
+        assert!(denied_selection("IssueConnection", "exportUrl").is_some());
+        assert!(denied_selection("ControlConnection", "exportUrl").is_some());
+        assert!(denied_selection("ServiceAccount", "clientSecret").is_some());
+        assert!(denied_selection("ReportRun", "url").is_some());
+        // Type-scoped rules must not leak onto other types.
+        assert!(denied_selection("Issue", "url").is_none());
+        assert!(denied_selection("Issue", "clientSecret").is_none());
+        assert!(denied_selection("ServiceAccount", "scopes").is_none());
     }
 
     #[test]

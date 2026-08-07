@@ -100,9 +100,29 @@ explicitly approved for this run. Anything else is a HALT, including a
 root field that merely looks harmless. You cannot eyeball a
 98,000-line schema for side effects, and you are not expected to.
 
-**Never CLEAR a document selecting `ServiceAccount.clientSecret`.** It is
-a selectable `String!` on that type. Selecting it puts live credentials
-on stdout and into the audit trail.
+**The allowlist governs ROOT fields only. A nested selection under an
+allowed root can still mint an artifact.** `issuesV2` is on the
+allowlist, so `issuesV2 { exportUrl(format: CSV, limit: 5000) }`
+satisfies the rule above while exporting up to five thousand tenant
+records to a URL. Check the whole selection set, not just the root.
+
+Never CLEAR a document selecting any of these, whatever root it sits
+under:
+
+- **`exportUrl`, on any type.** Twenty-six connection types carry it,
+  including `IssueConnection`, `AuditLogEntryConnection`,
+  `UserConnection`, `ProjectConnection`, `ControlConnection`, and
+  `GraphSearchResultConnection`. It generates a server-side export and
+  returns a link to it.
+- **`ReportRun.url`.** A pre-signed download link.
+- **`ServiceAccount.clientSecret`.** A selectable `String!` on that
+  type. Selecting it puts live credentials on stdout and into the audit
+  trail.
+
+`cargo xtask check-ops` now refuses these at build time for the curated
+documents (`DENIED_SELECTIONS` in `xtask/src/main.rs`). That does not
+cover ad-hoc `--query` documents, which never pass through the build.
+For those you are still the only check.
 
 **4. Load and shared quota.** Large or repeated pulls consume API
 capacity the IS team's own integrations depend on. A rate limit that
@@ -117,11 +137,24 @@ HALT on any of these:
 - a repeat of a bulk pull already performed this session
 
 The first two are keyed on the VERB and not on any number, and that is
-deliberate. Both `search` and `list --since` filter **client-side**
-(charter F2: there are no server-side filter variables yet). The
-predicate runs after the records arrive, so the read cannot stop early
-on a non-match: it walks the connection to the end, or until enough
-records have passed the predicate.
+deliberate. Both `search` and `list --since` filter **client-side,
+because stave's curated documents do not declare the filter variables
+the schema offers.** The predicate runs after the records arrive, so the
+read cannot stop early on a non-match: it walks the connection to the
+end, or until enough records have passed the predicate.
+
+Be precise about whose limitation this is, because an earlier version of
+this rule was not. Wiz exposes server-side filtering today: `issuesV2`
+and `cloudResourcesV2` both take `filterBy` and `orderBy`, and
+`IssueFilters` alone carries sixty input fields. stave's documents
+declare only `$first` and `$after`. So the walk is stave's, not the
+vendor's (`docs/design/field-surface-audit.md`, bd `aae-orc-j1xi`).
+
+**The HALT stands unchanged while that is true.** Today's documents do
+still walk the connection, so the load on the tenant is exactly what it
+was. Revisit this rule only when the curated documents actually pass
+filters, and revisit it deliberately rather than assuming the fix
+landed.
 
 `stave search cloud_resource <rare-string> --limit 5` therefore reads
 every record in a twenty-thousand-record connection, roughly forty

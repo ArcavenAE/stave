@@ -214,6 +214,18 @@ construction. `820a8b2` cut the request count for one such walk by
 roughly twelve times; it did not remove the walk, and no page-size
 tuning can. Only a server-side filter does. See finding-002.
 
+**Premise corrected 2026-08-07.** This question was posed as whether
+list operations should *grow* `filterBy` variables. They exist already:
+`issuesV2` and `cloudResourcesV2` both accept `filterBy` and `orderBy`,
+and `IssueFilters` carries 60 input fields including `status`,
+`severity`, `createdAt`, `assignee`, and `hasServiceTicket`. The curated
+documents declare only `$first` and `$after`, so the full-connection
+walk is a property of our documents and not of the Wiz API. `get`-by-id
+and `graphSearch` are likewise present as root fields rather than open
+questions. What remains open is which filters to expose and how, not
+whether they exist. See `docs/design/field-surface-audit.md` and bd
+`aae-orc-j1xi`.
+
 ### F3: MCP Live Validation
 
 The MCP client follows the streamable-HTTP shape verified against
