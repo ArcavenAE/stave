@@ -7,6 +7,8 @@ pre-commit:
       run: scripts/scrub.sh --selftest
     runlog-selftest:
       run: scripts/runlog.sh selftest
+    judge-selftest:
+      run: scripts/judge.sh selftest
     fmt:
       run: cargo +nightly fmt --all -- --check
     clippy:
