@@ -311,9 +311,17 @@ Execution is by argv, never through a shell. There is no `eval`, so
 there is no path by which a reviewed string and an executed command can
 differ, and no shell metacharacter surface to review.
 
-Single use matters because the coach's own check 4 halts on "a repeat of
-a bulk pull already performed this session". A verdict that could be
-replayed would license exactly the thing the coach is watching for.
+Single use matters because a bulk walk is an unconditional HALT under
+the coach's check 4, first time and every time. A verdict that could be
+replayed would license exactly what the coach refuses.
+
+The rationale survived a narrowing of that check on 2026-08-07, and is
+worth restating in its new terms: check 4 no longer halts a bounded
+`list` for being a repeat, so single use is not there to make repeats
+impossible. It is there so that ONE review licenses ONE execution.
+Without it, a CLEAR for `list issue --limit 25` would license that
+invocation any number of times, and the tally the coach now asks for
+would be counting reviews rather than reads.
 
 A HALT writes the verdict entry, a `halt` entry, and a `HALTED` file.
 While that file exists `exec` refuses everything, including invocations

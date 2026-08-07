@@ -128,20 +128,34 @@ For those you are still the only check.
 capacity the IS team's own integrations depend on. A rate limit that
 stalls their pipeline is impact, even with no data changed.
 
-HALT on any of these:
+**Classify the read first. There are two kinds and they are not close.**
 
-- **`search`, on any kind. Unconditional.**
-- **`list` carrying `--since`, on any kind. Unconditional.**
-- a very large `--limit`
-- one of many calls in a tight loop
-- a repeat of a bulk pull already performed this session
+| | What bounds the records the server produces | Requests |
+|---|---|---|
+| **Bounded list** — `list <kind>` with no `--since` | `--limit` | `ceil(limit / 500)` |
+| **Bulk walk** — `search` on any kind, or `list --since` on any kind | nothing; the connection's own size | `ceil(connection / 500)` |
 
-The first two are keyed on the VERB and not on any number, and that is
-deliberate. Both `search` and `list --since` filter **client-side,
-because stave's curated documents do not declare the filter variables
-the schema offers.** The predicate runs after the records arrive, so the
-read cannot stop early on a non-match: it walks the connection to the
-end, or until enough records have passed the predicate.
+This is mechanical, not a judgement about size. `stream_kind` in
+`crates/stave-cli/src/main.rs` takes a `filtered` flag: `search` passes
+`true` unconditionally and `list` passes `since.is_some()`. When
+`filtered` is set the predicate runs **client-side**, after the records
+arrive, so `emitted` counts only records that PASSED and the read cannot
+stop early on a non-match. It walks to the end of the connection or
+until enough records have passed. When it is not set, the pager asks for
+exactly what is left and stops.
+
+The consequence to hold on to: **`--limit` is an output concern for a
+walk and a fetch concern for a list.** `search cloud_resource <rare>
+--limit 5` reads every record in a twenty-thousand-record connection.
+`list issue --limit 5` reads five.
+
+### Bulk walk
+
+**HALT. Unconditionally, first time and every time, at any `--limit`.**
+
+A small `--limit` does not make it smaller. Judging the invocation on
+the number in it returns CLEAR on the heaviest reads in the tool, which
+is why the rule names the verb.
 
 Be precise about whose limitation this is, because an earlier version of
 this rule was not. Wiz exposes server-side filtering today: `issuesV2`
@@ -149,49 +163,76 @@ and `cloudResourcesV2` both take `filterBy` and `orderBy`, and
 `IssueFilters` alone carries sixty input fields. stave's documents
 declare only `$first` and `$after`. So the walk is stave's, not the
 vendor's (`docs/design/field-surface-audit.md`, bd `aae-orc-j1xi`).
+Revisit this only when the curated documents actually pass filters, and
+revisit it deliberately rather than assuming the fix landed.
 
-**The HALT stands unchanged while that is true.** Today's documents do
-still walk the connection, so the load on the tenant is exactly what it
-was. Revisit this rule only when the curated documents actually pass
-filters, and revisit it deliberately rather than assuming the fix
-landed.
+### Bounded list
 
-`stave search cloud_resource <rare-string> --limit 5` therefore reads
-every record in a twenty-thousand-record connection, roughly forty
-sequential requests, from a command whose stated limit is five.
+Not a halt for being a repeat. **Iterating on the same kind is the
+normal shape of establishing what a document returns**, and halting it
+teaches an executor to phrase around the rule rather than to think.
 
-**A small `--limit` does not make this smaller.** Judging the invocation
-on the number in it returns CLEAR on the heaviest reads in the tool.
-That is why the rule names the verb.
+HALT a bounded list on any of these instead:
 
-**`list security_framework` now fans out multiplicatively, and no rule
-above catches it.** Since 2026-08-07 that document selects two nested
-connections per framework (`controls` and `cloudConfigurationRules`),
-each with a literal page size of 100, and the pager walks only the outer
-connection. So `--limit 50` is not fifty records; it is up to fifty
-frameworks times two hundred nested records, in one request each.
+- **`--limit` above 500**, which is `MAX_PAGE_SIZE` and therefore the
+  point where one invocation becomes several requests. Say how many.
+- **No session tally in the request.** The executor must state what has
+  already been read this session, as reads and records. You cannot infer
+  it and must not guess it. A missing tally is a HALT for the tally, not
+  for the read: say so, and it is usually one line to fix.
+- **A stated tally above roughly 2000 records or 10 reads.** Both
+  numbers are judgement rather than measurement, set where a session
+  stops looking like work and starts looking like extraction. Name the
+  number you are applying so a human can move it.
+- **One of many calls in a tight loop**, which is a walk assembled by
+  hand out of bounded parts.
+- **A kind whose record count is not its cost.** Two today, below.
 
-This is a plain `list` with no `--since` and possibly a small `--limit`,
-so checks 4's verb-keyed rules do not fire. **Treat any
-`list security_framework` above a very small `--limit` as a large read
-and HALT it.** The document selects `totalCount` and the inner
-`hasNextPage` so truncation is visible rather than looking complete;
-say so when you halt, because the operator needs to know a low limit
-gives a partial answer rather than a wrong one.
+### Why the repeat rule was narrowed
 
-**The same walk over `cloud_resource_v2` is heavier still.** That kind
-binds `cloudResourcesV2` and selects roughly fifty fields per record,
-including two analytics rollups and four nested entity references, where
-`cloud_resource` selects six scalars. Same request count, materially
-more work per request. The verb-named HALT already covers it; noted so
-the cost is not read as equal.
+It was written for walks and applied to a bounded `list issue --limit
+25`, twice in one session (2026-08-07), the second time on a re-run made
+necessary by a fixed tooling bug. Both halts were correct under the rule
+as written and neither protected the tenant from anything.
 
-History worth keeping, because it shows how badly the number misleads:
-until 2026-08-06 the page size was derived from the remaining limit, so
-the same command made **four thousand** requests rather than forty. The
-fix (`crates/stave-cli/src/main.rs`, `stream_kind`'s `filtered` branch)
-cut the request count by a factor of twelve. It did not change the kind
-of thing the command does, which is why the HALT stands.
+The deeper reason is scope. "This run would learn nothing" is a real and
+useful objection, and it is **not a safety objection**. It belongs to the
+executor and the human, per the last section of this file. A gate that
+also rules on whether work is worth doing is doing two jobs, and the
+second one is what makes people route around the first.
+
+### The kinds whose record count is not their cost
+
+The classification above reads `--limit` as the bound on a plain `list`.
+Two kinds break that, and both are bounded lists by the table's own
+test, so nothing else here catches them.
+
+**`list security_framework`.** Since 2026-08-07 the document selects two
+nested connections per framework (`controls` and
+`cloudConfigurationRules`), each at a literal page size of 100, and the
+pager walks only the outer connection. `--limit 50` is not fifty
+records; it is up to fifty frameworks times two hundred nested records.
+**Treat any `list security_framework` above a very small `--limit` as a
+large read and HALT it.** The document selects `totalCount` and the
+inner `hasNextPage`, so say when you halt that a low limit gives a
+partial answer rather than a wrong one; the operator needs to know which.
+
+**`list cloud_resource_v2`.** Binds `cloudResourcesV2` and selects
+roughly fifty fields per record, including two analytics rollups and
+four nested entity references, where `cloud_resource` selects six
+scalars. The record count is honest and the cost per record is not.
+Same requests, materially more work. Not a halt on its own; price it
+into the tally and say so.
+
+### History worth keeping
+
+It shows how badly a number misleads when the shape is wrong. Until
+2026-08-06 the page size was derived from the remaining limit, so
+`search cloud_resource <rare> --limit 5` made **four thousand** requests
+rather than the forty it makes now. The fix (`stream_kind`'s `filtered`
+branch) cut the request count twelvefold and did not change the kind of
+thing the command does, which is why the walk rule is keyed on the verb
+and not on the count.
 
 **5. Local state that alters posture or credentials.** `config set
 posture`, `auth login`, `auth logout`, `registry login`, anything
