@@ -107,6 +107,13 @@ introspected it. Field selections are conservative and **provisional
 until live-validated** (F1) — a wrong guess fails loudly as a GraphQL
 validation error, never silently.
 
+Qualified 2026-08-07: selection width was the wrong thing to worry
+about first. The field-surface audit found the binding matters more —
+`cloudResources` returns an eight-field type of which stave already
+selects six, so no widening reaches those runbooks and only binding
+`cloudResourcesV2` does. See `docs/design/field-surface-audit.md` and bd
+`aae-orc-rsh6`.
+
 ### B3: Auth — OAuth Client-Credentials with Keychain Custody and a Real Derivation Layer
 
 Fourth val-resolution-chain instantiation, and the first where the
@@ -195,18 +202,35 @@ selections, not the read path. Every live probe so far ran at
 `--limit 2`, so each returned one page, and two paging defects lived
 below that depth until a pre-run review found them. See finding-002.
 
+Session 2 of 2026-08-07, live: queue item 1 of the widening validation
+is closed. The single inline fragment on `VulnerableAssetBase`, standing
+in for fourteen union members, is accepted and returning (populated
+20/20), so the fourteen-fragment fallback is dead. `x1rg` validated
+live: `severity` is populated 20/20 and equals `vendorSeverity` on every
+record, so the gap those two fields exist to expose is zero on this
+sample. Seven queue items remain, several with a sampling floor they
+cannot cross until `filterBy` lands (bd `aae-orc-j1xi`). Detail in
+`docs/design/widening-notes.md` and bd `aae-orc-qijl`.
+
+The scope-qualification item now has a concrete route to try rather than
+an open question: `ServiceAccount.scopes`, tracked as bd `aae-orc-8af5`.
+The study itself is bd `aae-orc-cw9y`.
+
 Remaining: scope-qualification study, MCP transport (F3), and the
 composite-verb question (F4). `SCOPE_METADATA_PROVISIONAL` stays true.
 
 ### F2: Schema Introspection, get-by-id, and Server-Side Filters
 
 `cargo xtask sync-spec` introspects the schema once credentials exist;
-`check-ops` then validates the curated documents. Open questions:
-which kinds get `stave get <kind> <id>` (needs per-kind singular
-queries or filter input types — deliberately not guessed at scaffold
-time); which list operations grow `filterBy` variables (server-side
-filtering vs the current client-side `stave filter`); whether
-`graphSearch` becomes a first-class verb.
+`check-ops` then validates the curated documents. This section was
+posed as three open questions: which kinds get `stave get <kind> <id>`,
+which list operations grow `filterBy` variables, and whether
+`graphSearch` becomes a first-class verb. **All three were questions
+about the vendor and none of them should have been.** The 2026-08-07
+audit found singular root fields (`issue(id:)`, `cloudResource(id:)`
+and the rest) and `graphSearch` with its own filters already present in
+the schema. What is open is which to expose and how, not whether they
+exist.
 
 Evidence for the server-side filter, added 2026-08-06: while `search`
 and `--since` filter client-side they are full-connection walks by
@@ -238,9 +262,25 @@ crosswalk to curated operations.
 ### F4: Audit-Trail Mining → v0.2 Composite Verbs
 
 Same question as the siblings: which composite verbs do Wiz workflows
-want (`issue-triage`, `vuln-exposure`, `posture-report`)? Deferred
-until real usage accumulates — the explicit purpose of shipping the
-audit trail first.
+want (`issue-triage`, `vuln-exposure`, `posture-report`)? Originally
+deferred until real usage accumulates, the explicit purpose of shipping
+the audit trail first.
+
+No longer deferred, and the answer is narrower than the question was.
+The 20-runbook elicitation was run against a sealed vendor-surface
+control arm under a pre-registered scoring predicate, and the gate
+returned Outcome 3, continue, on a narrower certified finding than the
+exercise set out to test. Ruling, the six pre-registration defects it
+exposed, and what unblocks in what order:
+`docs/design/verb-comparison-gate.md`. The elicitation corpus is
+`docs/runbooks/catalogue.md`; bd `aae-orc-e4jo` is the umbrella.
+
+One correction the gate work produced that bears on this question
+directly: glue that exists because our own documents are thin is
+document debt, not verb demand. Sixteen of 106 paper glue stages
+disappear once `rsh6`, `j1xi`, `qijl` and `gs23` land, ten of them in
+class A alone, and the run harness makes that answer mandatory per
+recorded stage rather than optional.
 
 ### F5: Distribution [largely resolved]
 
