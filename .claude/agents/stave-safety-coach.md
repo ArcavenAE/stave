@@ -117,22 +117,26 @@ HALT on any of these:
 - a repeat of a bulk pull already performed this session
 
 The first two are keyed on the VERB and not on any number, and that is
-deliberate. Reviewed 2026-08-06 at `crates/stave-cli/src/main.rs:1730`:
-page size is `limit.saturating_sub(emitted).min(MAX_PAGE_SIZE)`, and
-`emitted` increments only after the client-side predicate accepts a
-record (`:1759`). Both `search` and `--since` filter client-side. So a
-non-matching predicate never advances the counter, the loop pages until
-the connection is exhausted, and **the page size stays pinned at the
-remaining `--limit`**.
+deliberate. Both `search` and `list --since` filter **client-side**
+(charter F2: there are no server-side filter variables yet). The
+predicate runs after the records arrive, so the read cannot stop early
+on a non-match: it walks the connection to the end, or until enough
+records have passed the predicate.
 
-`stave search cloud_resource <rare-string> --limit 5` therefore walks a
-twenty-thousand-record connection at five records per HTTP request.
-Thousands of sequential requests, from a command whose stated limit is
-five.
+`stave search cloud_resource <rare-string> --limit 5` therefore reads
+every record in a twenty-thousand-record connection, roughly forty
+sequential requests, from a command whose stated limit is five.
 
-**A small `--limit` makes this worse, not better.** Judging this
-invocation on its page count returns CLEAR on the most dangerous command
-in the tool. That is why the rule names the verb.
+**A small `--limit` does not make this smaller.** Judging the invocation
+on the number in it returns CLEAR on the heaviest reads in the tool.
+That is why the rule names the verb.
+
+History worth keeping, because it shows how badly the number misleads:
+until 2026-08-06 the page size was derived from the remaining limit, so
+the same command made **four thousand** requests rather than forty. The
+fix (`crates/stave-cli/src/main.rs`, `stream_kind`'s `filtered` branch)
+cut the request count by a factor of twelve. It did not change the kind
+of thing the command does, which is why the HALT stands.
 
 **5. Local state that alters posture or credentials.** `config set
 posture`, `auth login`, `auth logout`, `registry login`, anything

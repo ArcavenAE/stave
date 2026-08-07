@@ -33,6 +33,13 @@ use uuid::Uuid;
 /// extra round trip, an oversized one is refused outright.
 const MAX_PAGE_SIZE: usize = 500;
 
+/// How many consecutive zero-node pages stave will follow before it
+/// gives up on a connection. An empty page with `hasNextPage: true` is
+/// legitimate and must be followed (see `stream_kind`), but a server
+/// that emits them without end, each with a fresh cursor, would
+/// otherwise page forever against a live tenant.
+const MAX_EMPTY_PAGES: usize = 10;
+
 /// Recipe names the SDK's enrichment library accepts. Mirrored here for
 /// error messages only: `enrich::Recipe::parse` stays the authority, and
 /// `recipe_names_match_sdk` in the tests below fails loudly if this list
@@ -1652,6 +1659,9 @@ fn run_list(args: ListArgs) -> anyhow::Result<()> {
         args.no_audit,
         "list",
         args.limit,
+        // `--since` filters client-side, so with one in play the page
+        // size must not be derived from the limit.
+        since.is_some(),
         |record| match &since {
             None => Ok(true),
             Some(program) => cel::evaluate(program, record, now, "<--since predicate>")
@@ -1678,6 +1688,8 @@ fn run_search(args: SearchArgs) -> anyhow::Result<()> {
         args.no_audit,
         "search",
         args.limit,
+        // Every search is a client-side substring pass (charter F2).
+        true,
         |record| {
             let Some(haystack) = record.get(search_field).and_then(Value::as_str) else {
                 return Ok(false);
@@ -1712,6 +1724,7 @@ async fn stream_kind(
     no_audit: bool,
     verb_phase: &'static str,
     limit: usize,
+    filtered: bool,
     mut keep: impl FnMut(&Record) -> anyhow::Result<bool>,
 ) -> anyhow::Result<()> {
     let op = ops::find(spec.list_operation).map_err(|e| anyhow!("{e}"))?;
@@ -1727,8 +1740,25 @@ async fn stream_kind(
     let mut index = 0usize;
     let mut after: Option<String> = None;
 
+    let mut empty_pages = 0usize;
+
     while emitted < limit {
-        let page = limit.saturating_sub(emitted).min(MAX_PAGE_SIZE);
+        // Page size is a fetch concern; `--limit` is an output concern.
+        // With no predicate the two coincide, because every fetched
+        // record is emitted, and asking for exactly what is left is the
+        // cheapest correct request.
+        //
+        // With a predicate they are unrelated. `emitted` counts records
+        // that PASSED `keep`, so sizing the request from the remaining
+        // limit pins every page to `--limit` however large the
+        // connection is: `search cloud_resource <rare> --limit 5` walked
+        // a twenty-thousand-record connection five records per HTTP
+        // request. Fetch whole pages whenever a predicate is filtering.
+        let page = if filtered {
+            MAX_PAGE_SIZE
+        } else {
+            limit.saturating_sub(emitted).min(MAX_PAGE_SIZE)
+        };
         let mut variables = Map::new();
         variables.insert("first".to_string(), json!(page));
         if let Some(cursor) = &after {
@@ -1766,11 +1796,48 @@ async fn stream_kind(
             }
         }
 
-        // An empty page with a cursor would loop forever; treat it as
-        // the end of the connection.
         match next_cursor(&data, op.root_field) {
-            Some(cursor) if page_len > 0 => after = Some(cursor),
-            _ => break,
+            // A page can be empty while the connection has more to
+            // give: server-side filtering, permission scoping, and
+            // deleted rows all produce a page of zero nodes with
+            // `hasNextPage: true`. Following the cursor is the only
+            // correct move. Stopping here reported a short read as a
+            // complete one, exit 0, nothing on stderr, and a caller
+            // counting records got a smaller number than the truth.
+            Some(cursor) => {
+                if after.as_deref() == Some(cursor.as_str()) {
+                    // The cursor did not advance, so following it again
+                    // repeats this request forever. THIS is the
+                    // termination hazard, and it is a property of the
+                    // cursor, never of the page being empty.
+                    eprintln!(
+                        "stave: {} returned the same cursor twice; stopping after {emitted} \
+                         record(s). The read is incomplete.",
+                        op.root_field
+                    );
+                    break;
+                }
+                if page_len == 0 {
+                    empty_pages += 1;
+                    if empty_pages > MAX_EMPTY_PAGES {
+                        eprintln!(
+                            "stave: {} returned {MAX_EMPTY_PAGES} consecutive empty pages; \
+                             stopping after {emitted} record(s). The read is incomplete.",
+                            op.root_field
+                        );
+                        break;
+                    }
+                    eprintln!(
+                        "stave: {} returned an empty page with more pages available; following \
+                         the cursor.",
+                        op.root_field
+                    );
+                } else {
+                    empty_pages = 0;
+                }
+                after = Some(cursor);
+            }
+            None => break,
         }
     }
     Ok(())

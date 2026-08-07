@@ -250,9 +250,16 @@ async fn list_stops_at_the_limit_without_asking_for_another_page() {
 }
 
 #[tokio::test]
-async fn list_treats_an_empty_page_as_the_end_of_the_connection() {
-    // A connection that keeps promising another page while returning
-    // nothing would loop forever; the client breaks instead.
+async fn list_stops_on_a_connection_that_never_advances_its_cursor() {
+    // This test used to assert that an empty page ends the connection,
+    // which conflated two different things and cost real records: a
+    // zero-node page with `hasNextPage: true` is legitimate and must be
+    // followed (see `tests/paging.rs`). What actually cannot terminate
+    // is a cursor that never moves, and that is what is asserted here.
+    //
+    // The server repeats one cursor. stave follows it once, sees the
+    // same value come back, and stops: two requests, no records, and a
+    // warning that the read is incomplete rather than a silent exit 0.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
@@ -261,7 +268,7 @@ async fn list_treats_an_empty_page_as_the_end_of_the_connection() {
             vec![],
             Some("cursor-that-never-ends"),
         )))
-        .expect(1)
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -273,6 +280,11 @@ async fn list_treats_an_empty_page_as_the_end_of_the_connection() {
         .env("STAVE_BASE_URL", graphql_url(&server)));
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stdout_of(&out).trim().is_empty(), "no records to emit");
+    assert!(
+        stderr_of(&out).contains("same cursor twice"),
+        "the caller must be told the read stopped short: {}",
+        stderr_of(&out)
+    );
 }
 
 // ---------------------------------------------------------------------------
