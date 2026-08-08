@@ -911,12 +911,109 @@ fn active_profile_name() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// What `auth login` will do, decided before anything is stored.
+///
+/// Extracted as a pure function for the same reason `select_profile`
+/// was: the keyring cannot be exercised in a hermetic test (a macOS
+/// access prompt hangs a headless run), so with the decision embedded
+/// in the side-effecting body there was NO test coverage of the login
+/// path at all. Two defects shipped through that gap: the client ID was
+/// persisted to `[auth]` while a profile was active, clobbering the
+/// unnamed credential's ID, and the plane check ran after the token
+/// mint rather than before it.
+#[derive(Debug, PartialEq, Eq)]
+struct LoginPlan {
+    /// Where the client ID comes from.
+    client_id: ClientIdPlan,
+    /// Profile whose config slot receives the ID; `None` means `[auth]`.
+    persist_to: Option<String>,
+    /// Whether to mint a token once the credential is stored.
+    verify: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClientIdPlan {
+    /// Supplied by `--client-id`.
+    Flag,
+    /// Already stored on the active profile; do not ask again.
+    Stored,
+    /// Ask, or walk the resolution chain.
+    Resolve,
+}
+
+fn plan_login(
+    active: Option<&str>,
+    flag_id: Option<&str>,
+    stored_id: Option<&str>,
+    declared: Option<auth::Plane>,
+    running: auth::Plane,
+    no_verify: bool,
+) -> LoginPlan {
+    let client_id = if flag_id.map(str::trim).is_some_and(|v| !v.is_empty()) {
+        ClientIdPlan::Flag
+    } else if stored_id.map(str::trim).is_some_and(|v| !v.is_empty()) {
+        ClientIdPlan::Stored
+    } else {
+        ClientIdPlan::Resolve
+    };
+    // Enrolment is local credential management and any binary may do
+    // it. Minting is session establishment: it presents the secret and
+    // leaves this process holding a usable session for that identity.
+    // A read binary must not hold a provisioning session.
+    let plane_ok = match (active, declared) {
+        (Some(_), Some(plane)) => plane == running,
+        _ => true,
+    };
+    LoginPlan {
+        client_id,
+        persist_to: active.map(str::to_string),
+        verify: !no_verify && plane_ok,
+    }
+}
+
 fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
     // Client ID first, so the prompts read in the order a person expects
     // and so a --stdin secret is never consumed by an ID prompt.
-    let client_id = match args.client_id.as_deref().map(str::trim) {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => resolve_login_client_id(args.stdin)?,
+    let active = active_profile_name();
+    let stored_id = active
+        .as_deref()
+        .map(auth::profile_client_id)
+        .transpose()
+        .map_err(|e| anyhow!("{e}"))?
+        .flatten();
+    let declared_plane = active
+        .as_deref()
+        .map(auth::profile_plane)
+        .transpose()
+        .map_err(|e| anyhow!("{e}"))?
+        .flatten();
+    let plan = plan_login(
+        active.as_deref(),
+        args.client_id.as_deref(),
+        stored_id.as_deref(),
+        declared_plane,
+        auth::current_binary_plane(),
+        args.no_verify,
+    );
+    let client_id = match plan.client_id {
+        ClientIdPlan::Flag => args
+            .client_id
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string(),
+        // A profile already carries its client ID from `profile add`.
+        // Asking again makes the operator retype a long identifier,
+        // which is a chance to get it wrong.
+        ClientIdPlan::Stored => {
+            let id = stored_id.clone().unwrap_or_default();
+            eprintln!(
+                "stave auth: using the client ID stored for profile {:?}",
+                active.as_deref().unwrap_or_default()
+            );
+            id
+        }
+        ClientIdPlan::Resolve => resolve_login_client_id(args.stdin)?,
     };
 
     let secret = read_secret(args.stdin, "Wiz client secret: ", "--client-id")?;
@@ -962,8 +1059,18 @@ fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
         .filter(|s| !s.is_empty());
     let token_url_owned = token_url_arg.map(str::to_string);
     let client_id_owned = client_id.clone();
+    let persist_profile = plan.persist_to.clone();
     let path = auth::write_config(|cfg| {
-        cfg.auth.client_id = Some(client_id_owned);
+        // With a profile active the ID belongs to THAT profile. Writing
+        // it to `[auth]` clobbers the unnamed credential's ID while
+        // leaving the unnamed secret in place, producing a mismatched
+        // pair that fails at mint time with no clue why.
+        match persist_profile.as_deref() {
+            Some(name) => {
+                cfg.profile.entry(name.to_string()).or_default().client_id = Some(client_id_owned);
+            }
+            None => cfg.auth.client_id = Some(client_id_owned),
+        }
         if let Some(url) = api_url_owned {
             cfg.default.api_url = Some(url);
         }
@@ -972,12 +1079,15 @@ fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
         }
     })
     .map_err(|e| anyhow!("{e}"))?;
-    let mut persisted = vec!["client_id"];
+    let mut persisted = match active.as_deref() {
+        Some(name) => vec![format!("profile.{name}.client_id")],
+        None => vec!["client_id".to_string()],
+    };
     if api_url.is_some() {
-        persisted.push("api_url");
+        persisted.push("api_url".to_string());
     }
     if token_url_arg.is_some() {
-        persisted.push("token_url");
+        persisted.push("token_url".to_string());
     }
     eprintln!(
         "stave auth: persisted {} to {}",
@@ -988,8 +1098,21 @@ fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
     // A token minted from the previous secret must not outlive it.
     token::clear_cache().map_err(|e| anyhow!("{e}"))?;
 
-    if args.no_verify {
-        eprintln!("stave auth: skipped verification (--no-verify)");
+    if !plan.verify {
+        if args.no_verify {
+            eprintln!("stave auth: skipped verification (--no-verify)");
+        } else {
+            let running = auth::current_binary_plane();
+            let plane = declared_plane.unwrap_or(running);
+            eprintln!(
+                "stave auth: profile {:?} enrolled ({} plane). Skipping the token mint: \
+                 this binary is the {} plane and must not hold a {} session.",
+                active.as_deref().unwrap_or_default(),
+                plane.as_str(),
+                running.as_str(),
+                plane.as_str()
+            );
+        }
         return Ok(());
     }
 
@@ -3230,5 +3353,110 @@ mod tests {
         assert_eq!(json_type_name(&json!("s")), "a string");
         assert_eq!(json_type_name(&json!([])), "an array");
         assert_eq!(json_type_name(&json!({})), "an object");
+    }
+}
+
+#[cfg(test)]
+mod login_plan_tests {
+    use stave_sdk::auth::Plane;
+
+    use super::*;
+
+    #[test]
+    fn a_stored_profile_id_is_reused_rather_than_reprompted() {
+        let p = plan_login(
+            Some("reader"),
+            None,
+            Some("id-reader"),
+            Some(Plane::Read),
+            Plane::Read,
+            false,
+        );
+        assert_eq!(p.client_id, ClientIdPlan::Stored);
+    }
+
+    #[test]
+    fn an_explicit_flag_outranks_the_stored_id() {
+        let p = plan_login(
+            Some("reader"),
+            Some("id-override"),
+            Some("id-reader"),
+            Some(Plane::Read),
+            Plane::Read,
+            false,
+        );
+        assert_eq!(p.client_id, ClientIdPlan::Flag);
+    }
+
+    #[test]
+    fn with_no_profile_and_no_flag_the_chain_is_walked() {
+        let p = plan_login(None, None, None, None, Plane::Read, false);
+        assert_eq!(p.client_id, ClientIdPlan::Resolve);
+        assert_eq!(p.persist_to, None);
+    }
+
+    #[test]
+    fn an_active_profile_receives_the_id_not_the_unnamed_slot() {
+        // The regression that clobbered the read account's client ID.
+        let p = plan_login(
+            Some("provisioner"),
+            Some("id-provisioner"),
+            None,
+            Some(Plane::Provision),
+            Plane::Read,
+            false,
+        );
+        assert_eq!(p.persist_to.as_deref(), Some("provisioner"));
+    }
+
+    #[test]
+    fn an_off_plane_profile_is_enrolled_but_not_verified() {
+        // Ordering is the property: a read binary that mints first has
+        // already held a provisioning session, and a later refusal is
+        // decoration.
+        let p = plan_login(
+            Some("provisioner"),
+            Some("id-provisioner"),
+            None,
+            Some(Plane::Provision),
+            Plane::Read,
+            false,
+        );
+        assert!(!p.verify, "an off-plane profile must not mint");
+        assert_eq!(p.persist_to.as_deref(), Some("provisioner"));
+    }
+
+    #[test]
+    fn an_on_plane_profile_is_verified() {
+        // Negative control: without it, a bug skipping verification for
+        // everything would pass unnoticed.
+        let p = plan_login(
+            Some("reader"),
+            None,
+            Some("id-reader"),
+            Some(Plane::Read),
+            Plane::Read,
+            false,
+        );
+        assert!(p.verify);
+    }
+
+    #[test]
+    fn no_verify_wins_over_an_on_plane_profile() {
+        let p = plan_login(
+            Some("reader"),
+            None,
+            Some("id-reader"),
+            Some(Plane::Read),
+            Plane::Read,
+            true,
+        );
+        assert!(!p.verify);
+    }
+
+    #[test]
+    fn an_unknown_declared_plane_does_not_block_the_unnamed_path() {
+        let p = plan_login(None, Some("id"), None, None, Plane::Read, false);
+        assert!(p.verify);
     }
 }

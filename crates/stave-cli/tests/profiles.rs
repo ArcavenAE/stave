@@ -7,9 +7,7 @@
 //! and the two properties that make profiles a safety feature rather
 //! than an ergonomic one.
 
-use std::process::Command;
-
-use assert_cmd::prelude::*;
+use assert_cmd::Command;
 use tempfile::TempDir;
 
 /// A binary invocation with a private config file and the platform
@@ -260,5 +258,50 @@ fn no_profile_configured_leaves_the_unnamed_credential_path_intact() {
     assert!(
         !body.contains("not configured"),
         "unnamed path disturbed: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// enrolment (`auth login --profile`)
+// ---------------------------------------------------------------------------
+//
+// The decisions `auth login` makes (which client ID, which config slot,
+// whether to mint) are covered by the `login_plan_tests` unit tests on
+// `plan_login` in src/main.rs. They cannot be covered here: the login
+// path stores to the platform keyring, the sandbox sets
+// STAVE_KEYRING=off so a hermetic run never opens the real Keychain,
+// and the store fails before any of those decisions take effect.
+//
+// That gap is why two defects shipped in the first cut of profiles: the
+// client ID was persisted to `[auth]` while a profile was active, and
+// the plane check ran after the token mint instead of before it.
+
+#[test]
+fn login_refuses_cleanly_when_the_keyring_is_unavailable() {
+    // What IS testable here: the failure is the keyring's, reported as
+    // such, rather than a partial enrolment that half-wrote config.
+    let dir = TempDir::new().unwrap();
+    add_reader(&dir);
+
+    let out = stave(&dir)
+        .args([
+            "--profile",
+            "reader",
+            "auth",
+            "login",
+            "--stdin",
+            "--no-verify",
+        ])
+        .write_stdin("the-secret\n")
+        .output()
+        .unwrap();
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(!out.status.success());
+    assert!(err.contains("keyring is disabled"), "{err}");
+    // The stored client ID was reused rather than reprompted, which is
+    // observable even though the store then failed.
+    assert!(
+        err.contains("using the client ID stored for profile"),
+        "reprompted despite a stored id: {err}"
     );
 }

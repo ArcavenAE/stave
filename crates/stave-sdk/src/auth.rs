@@ -576,6 +576,38 @@ pub fn profile_secret_present(profile: &str) -> bool {
     read_keyring_entry(&keyring_client_secret_user(profile)).is_some()
 }
 
+/// A profile's stored client ID, read directly from config.
+///
+/// Deliberately bypasses [`resolve_profile`]: enrolment (`auth login`)
+/// must see a profile whose plane this binary may not *use*, and must
+/// also work for a profile being created in the same breath.
+pub fn profile_client_id(profile: &str) -> Result<Option<String>> {
+    Ok(read_config()?
+        .and_then(|c| c.profile.get(profile).and_then(|p| p.client_id.clone()))
+        .filter(|s| !s.is_empty()))
+}
+
+/// A profile's declared plane, read directly from config. `None` when
+/// the profile does not exist; absent-but-present means [`Plane::Read`].
+pub fn profile_plane(profile: &str) -> Result<Option<Plane>> {
+    let Some(cfg) = read_config()? else {
+        return Ok(None);
+    };
+    let Some(entry) = cfg.profile.get(profile) else {
+        return Ok(None);
+    };
+    match &entry.plane {
+        Some(v) => Plane::parse(v).map(Some),
+        None => Ok(Some(Plane::Read)),
+    }
+}
+
+/// The plane this binary declared. Exposed so enrolment can report the
+/// mismatch it is refusing to act on.
+pub fn current_binary_plane() -> Plane {
+    binary_plane()
+}
+
 /// Read the client secret from the keyring (`None` = absent/unavailable).
 pub fn read_client_secret_keyring() -> Option<String> {
     read_keyring_entry(KEYRING_CLIENT_SECRET_USER)
