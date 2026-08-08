@@ -15,12 +15,25 @@
 //!   siblings, the chain's derivation layer is real here.
 //! * **Registry chain** — the container-registry password (env →
 //!   keyring → config) for registry pulls.
+//! * **Profile chain** — `--profile` → `STAVE_PROFILE` → `[default]
+//!   profile` → none. A profile names one service account; when one is
+//!   active it supplies the client ID, the keyring account, and any
+//!   endpoint override, sitting *above* `[auth]` rather than replacing
+//!   it so an install predating profiles is untouched.
+//!
+//! The profile layer carries two refusals that are safety properties
+//! rather than ergonomics, and no surveyed CLI (aws, gcloud, spacectl,
+//! gh, kubectl) has either: a provision-plane profile can never be
+//! reached through the stored default, and a credential may only be
+//! used by the binary whose plane it belongs to. See
+//! [`select_profile`] and `docs/design/profiles-and-credential-selection.md`.
 //!
 //! Minted access tokens are cached in the XDG state dir (mode 0600),
 //! never in config: they are short-lived derivatives of the client
 //! secret, and the state dir keeps them out of both the keyring's
 //! prompt surface and the config file's plain TOML.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -32,10 +45,42 @@ pub const CLIENT_SECRET_ENV: &str = "STAVE_CLIENT_SECRET";
 pub const API_URL_ENV: &str = "STAVE_API_URL";
 pub const TOKEN_URL_ENV: &str = "STAVE_TOKEN_URL";
 pub const CONFIG_ENV: &str = "STAVE_CONFIG";
+pub const PROFILE_ENV: &str = "STAVE_PROFILE";
 pub const REGISTRY_PASSWORD_ENV: &str = "STAVE_REGISTRY_PASSWORD";
 pub const KEYRING_SERVICE: &str = "stave";
 pub const KEYRING_CLIENT_SECRET_USER: &str = "client-secret";
 pub const KEYRING_REGISTRY_USER: &str = "registry-password";
+
+/// Keyring account for a named profile's client secret. Unnamed
+/// (profile-less) setups keep using [`KEYRING_CLIENT_SECRET_USER`], so
+/// an existing install is unaffected by the introduction of profiles.
+pub fn keyring_client_secret_user(profile: &str) -> String {
+    format!("{KEYRING_CLIENT_SECRET_USER}:{profile}")
+}
+
+/// Process-wide `--profile` override, set once from argv before any
+/// resolution runs.
+///
+/// A global is the honest shape here rather than a threaded parameter:
+/// the profile selects a *credential*, which every chain in this module
+/// already resolves from ambient sources (env, config), and threading it
+/// through ~8 call sites would put the same value in every signature
+/// while changing nothing about where it comes from.
+static PROFILE_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Record the `--profile` flag. Call once, from argv parsing, before
+/// any credential resolution. Later calls are ignored.
+pub fn set_profile_override(name: &str) {
+    let trimmed = name.trim();
+    if !trimmed.is_empty() {
+        let _ = PROFILE_OVERRIDE.set(trimmed.to_string());
+    }
+}
+
+/// The `--profile` value, if one was given on this invocation.
+pub fn profile_override() -> Option<String> {
+    PROFILE_OVERRIDE.get().cloned()
+}
 
 /// Default OAuth token endpoint. Constant across commercial Wiz
 /// tenants; the chain exists for gov/isolated clouds and tests.
@@ -102,8 +147,20 @@ pub struct ResolvedParam {
     pub source: ParamSource,
 }
 
-/// Resolve the service-account client ID: flag → env → config.
+/// Resolve the service-account client ID: flag → env → active
+/// profile → config `[auth]`.
+///
+/// The profile layer sits above `[auth]` rather than replacing it, so
+/// an install that predates profiles keeps working untouched.
 pub fn resolve_client_id(flag: Option<&str>) -> Result<Option<ResolvedParam>> {
+    if let Some(p) = resolve_profile()? {
+        if let Some(id) = p.client_id {
+            return Ok(Some(ResolvedParam {
+                value: id,
+                source: ParamSource::Config,
+            }));
+        }
+    }
     resolve_param(flag, CLIENT_ID_ENV, |c| c.auth.client_id.clone())
 }
 
@@ -122,6 +179,20 @@ pub fn resolve_client_secret() -> Result<Option<ResolvedSecret>> {
                 source: SecretSource::Env,
             }));
         }
+    }
+    if let Some(p) = resolve_profile()? {
+        if let Some(v) = read_keyring_entry(&keyring_client_secret_user(&p.name)) {
+            return Ok(Some(ResolvedSecret {
+                value: v,
+                source: SecretSource::Keyring,
+            }));
+        }
+        // A named profile does NOT fall back to the unnamed keyring
+        // entry or to `[auth] client_secret`. Falling back would run
+        // the command under whichever credential happens to be there,
+        // which is precisely the wrong-account-used-by-accident failure
+        // profiles exist to stop. Absent here means absent.
+        return Ok(None);
     }
     if let Some(v) = read_keyring_entry(KEYRING_CLIENT_SECRET_USER) {
         return Ok(Some(ResolvedSecret {
@@ -157,7 +228,18 @@ pub fn credentials_chain_error() -> StaveError {
 /// (Client construction) then tries the derivation layer (the minted
 /// token's data-center claim) before raising a chain-naming error.
 pub fn resolve_api_url(flag: Option<&str>) -> Result<Option<ResolvedParam>> {
-    resolve_param(flag, API_URL_ENV, |c| c.default.api_url.clone())
+    if let Some(explicit) = resolve_param(flag, API_URL_ENV, |_| None)? {
+        return Ok(Some(explicit));
+    }
+    if let Some(p) = resolve_profile()? {
+        if let Some(url) = p.api_url {
+            return Ok(Some(ResolvedParam {
+                value: url,
+                source: ParamSource::Config,
+            }));
+        }
+    }
+    resolve_param(None, API_URL_ENV, |c| c.default.api_url.clone())
 }
 
 /// Resolve the OAuth token endpoint: flag → env → config → built-in
@@ -214,6 +296,180 @@ pub fn resolve_posture() -> Result<Posture> {
             ))),
         },
     }
+}
+
+/// Which plane a profile's credential belongs to.
+///
+/// The read plane and the credential plane are separate binaries with
+/// separate credentials (see `docs/design/credential-plane.md`). The
+/// plane is recorded on the profile so a credential cannot be used by
+/// the wrong binary, which is the one property no surveyed CLI
+/// (AWS, gcloud, spacectl, gh, kubectl) attempts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Plane {
+    #[default]
+    Read,
+    Provision,
+}
+
+impl Plane {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Plane::Read => "read",
+            Plane::Provision => "provision",
+        }
+    }
+
+    fn parse(v: &str) -> Result<Plane> {
+        match v.trim() {
+            "read" => Ok(Plane::Read),
+            "provision" => Ok(Plane::Provision),
+            other => Err(StaveError::Auth(format!(
+                "profile `plane` must be `read` or `provision`, got {other:?}"
+            ))),
+        }
+    }
+}
+
+/// The plane of the *running binary*. Defaults to [`Plane::Read`]: an
+/// unset value must resolve to the stricter answer, so a binary that
+/// forgets to declare itself cannot reach a provisioning credential.
+static BINARY_PLANE: std::sync::OnceLock<Plane> = std::sync::OnceLock::new();
+
+/// Declare the running binary's plane. Call once at startup.
+pub fn set_binary_plane(plane: Plane) {
+    let _ = BINARY_PLANE.set(plane);
+}
+
+fn binary_plane() -> Plane {
+    *BINARY_PLANE.get().unwrap_or(&Plane::Read)
+}
+
+/// A profile selected through the chain, with the layer that named it.
+#[derive(Clone, Debug)]
+pub struct ResolvedProfile {
+    pub name: String,
+    pub source: ParamSource,
+    pub plane: Plane,
+    pub client_id: Option<String>,
+    pub api_url: Option<String>,
+    pub purpose: Option<String>,
+}
+
+/// Resolve the active profile: flag → env → config `[default] profile`
+/// → none (the unnamed legacy credential).
+///
+/// Three refusals, each of which would otherwise be a silent footgun:
+///
+/// * A named profile that does not exist is an error, never a silent
+///   fall-through to the unnamed credential. Falling through would run
+///   the command under a *different* identity than the one named.
+/// * A disabled profile is an error even when named explicitly. That is
+///   what `disable` is for.
+/// * **A provision-plane profile may not come from the stored default.**
+///   Every surveyed CLI makes the active credential invisible at the
+///   point of use and tells the operator to remember to check
+///   (`gh auth status`, `spacectl profile current`). Remembered controls
+///   are exactly what this repo keeps finding insufficient, and here the
+///   consequence is minting credentials in a production tenant under a
+///   profile nobody recalled was active. A provisioning profile is named
+///   per invocation or it is not used.
+pub fn resolve_profile() -> Result<Option<ResolvedProfile>> {
+    let (name, source) = match selected_profile_name()? {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let cfg = read_config()?.unwrap_or_default();
+    select_profile(&name, source, &cfg, binary_plane()).map(Some)
+}
+
+/// The decision half of [`resolve_profile`], with every ambient input
+/// passed in.
+///
+/// Split out so the refusals below are unit-testable without touching
+/// the environment: this crate forbids `unsafe`, so `set_var` is not
+/// available, and a control worth having is a control worth testing
+/// directly rather than only through a subprocess.
+pub fn select_profile(
+    name: &str,
+    source: ParamSource,
+    cfg: &Config,
+    binary: Plane,
+) -> Result<ResolvedProfile> {
+    let name = name.to_string();
+    let entry = cfg.profile.get(&name).ok_or_else(|| {
+        let mut known: Vec<&str> = cfg.profile.keys().map(String::as_str).collect();
+        known.sort_unstable();
+        let known = if known.is_empty() {
+            "none are configured".to_string()
+        } else {
+            known.join(", ")
+        };
+        StaveError::Auth(format!(
+            "profile {name:?} is not configured (named via {}). Known profiles: {known}.\n  \
+             - `stave profile list`  (what exists)\n  \
+             - `stave profile add {name} --client-id <id>`  (create it)",
+            source.as_str()
+        ))
+    })?;
+
+    if !entry.enabled {
+        return Err(StaveError::Auth(format!(
+            "profile {name:?} is disabled and will not be used.\n  \
+             - `stave profile enable {name}`  (re-enable it)"
+        )));
+    }
+
+    let plane = match &entry.plane {
+        Some(v) => Plane::parse(v)?,
+        None => Plane::Read,
+    };
+
+    if plane == Plane::Provision && source == ParamSource::Config {
+        return Err(StaveError::Auth(format!(
+            "profile {name:?} is a provisioning credential and cannot be the stored default. \
+             Name it explicitly on the call that needs it:\n  \
+             - `--profile {name}`\n  \
+             - `{PROFILE_ENV}={name}`\n\
+             A provisioning profile reached by stored default would let an unqualified \
+             command mint credentials."
+        )));
+    }
+
+    if plane != binary {
+        return Err(StaveError::Auth(format!(
+            "profile {name:?} belongs to the {} plane; this binary is the {} plane. \
+             Planes are separate binaries with separate credentials.",
+            plane.as_str(),
+            binary.as_str()
+        )));
+    }
+
+    Ok(ResolvedProfile {
+        name,
+        source,
+        plane,
+        client_id: entry.client_id.clone().filter(|s| !s.is_empty()),
+        api_url: entry.api_url.clone().filter(|s| !s.is_empty()),
+        purpose: entry.purpose.clone().filter(|s| !s.is_empty()),
+    })
+}
+
+fn selected_profile_name() -> Result<Option<(String, ParamSource)>> {
+    if let Some(v) = PROFILE_OVERRIDE.get() {
+        return Ok(Some((v.clone(), ParamSource::Flag)));
+    }
+    if let Ok(v) = std::env::var(PROFILE_ENV) {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some((trimmed.to_string(), ParamSource::Env)));
+        }
+    }
+    if let Some(v) = read_config()?.and_then(|c| c.default.profile.filter(|s| !s.is_empty())) {
+        return Ok(Some((v.trim().to_string(), ParamSource::Config)));
+    }
+    Ok(None)
 }
 
 /// Resolve the container-registry password: env → keyring → config.
@@ -303,6 +559,23 @@ pub fn store_client_secret(secret: &str) -> Result<()> {
     store_keyring_entry(KEYRING_CLIENT_SECRET_USER, secret)
 }
 
+/// Store a named profile's client secret in the platform keyring.
+pub fn store_profile_secret(profile: &str, secret: &str) -> Result<()> {
+    store_keyring_entry(&keyring_client_secret_user(profile), secret)
+}
+
+/// Delete a named profile's keyring entry (`Ok(false)` = nothing there).
+pub fn delete_profile_secret(profile: &str) -> Result<bool> {
+    delete_keyring_entry(&keyring_client_secret_user(profile))
+}
+
+/// Whether a named profile has a secret in the keyring. Reports
+/// presence only; the value is never returned to a caller that asked
+/// this question.
+pub fn profile_secret_present(profile: &str) -> bool {
+    read_keyring_entry(&keyring_client_secret_user(profile)).is_some()
+}
+
 /// Read the client secret from the keyring (`None` = absent/unavailable).
 pub fn read_client_secret_keyring() -> Option<String> {
     read_keyring_entry(KEYRING_CLIENT_SECRET_USER)
@@ -373,6 +646,52 @@ pub struct Config {
     pub registry: RegistryConfig,
     #[serde(skip_serializing_if = "McpConfig::is_empty")]
     pub mcp: McpConfig,
+    /// Named profiles, one per service account. `[profile.<name>]`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub profile: BTreeMap<String, ProfileConfig>,
+}
+
+/// One named service account. The secret never lives here: it goes to
+/// the platform keyring under [`keyring_client_secret_user`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProfileConfig {
+    /// Service-account client ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Endpoint override for this account. Usually absent: the
+    /// endpoint derives from the minted token's data-center claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+    /// What this credential is for, in the operator's words. Shown by
+    /// `stave profile list`, which is the point: a list of client IDs
+    /// tells you nothing about which one you want.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// `read` (default) or `provision`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plane: Option<String>,
+    /// Locally disabled profiles refuse to resolve even when named.
+    /// Absent means enabled: a profile someone just wrote by hand into
+    /// the config file should work, and opting *out* is the explicit act.
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
+}
+
+fn enabled_default() -> bool {
+    true
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        Self {
+            client_id: None,
+            api_url: None,
+            purpose: None,
+            plane: None,
+            enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -424,11 +743,16 @@ pub struct DefaultConfig {
     /// Mutations refuse unconditionally in both postures.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub posture: Option<String>,
+    /// Name of the profile used when neither `--profile` nor
+    /// `STAVE_PROFILE` names one. May not name a provision-plane
+    /// profile; see [`resolve_profile`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl DefaultConfig {
     fn is_empty(&self) -> bool {
-        self.api_url.is_none() && self.posture.is_none()
+        self.api_url.is_none() && self.posture.is_none() && self.profile.is_none()
     }
 }
 
@@ -642,6 +966,145 @@ client_id = "svc-xyz"
         assert!(
             !body.contains("[auth]"),
             "empty auth section should be skipped: {body:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    fn cfg() -> Config {
+        let mut c = Config::default();
+        c.default.profile = Some("reader".into());
+        c.profile.insert(
+            "reader".into(),
+            ProfileConfig {
+                client_id: Some("id-reader".into()),
+                purpose: Some("day-to-day reads".into()),
+                plane: Some("read".into()),
+                ..Default::default()
+            },
+        );
+        c.profile.insert(
+            "provisioner".into(),
+            ProfileConfig {
+                client_id: Some("id-provisioner".into()),
+                plane: Some("provision".into()),
+                ..Default::default()
+            },
+        );
+        c.profile.insert(
+            "retired".into(),
+            ProfileConfig {
+                client_id: Some("id-retired".into()),
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        c
+    }
+
+    #[test]
+    fn a_read_profile_resolves_and_carries_its_source() {
+        let p = select_profile("reader", ParamSource::Config, &cfg(), Plane::Read).unwrap();
+        assert_eq!(p.name, "reader");
+        assert_eq!(p.source, ParamSource::Config);
+        assert_eq!(p.plane, Plane::Read);
+        assert_eq!(p.client_id.as_deref(), Some("id-reader"));
+    }
+
+    #[test]
+    fn an_unknown_profile_errors_and_lists_the_known_ones() {
+        let err = select_profile("typo", ParamSource::Env, &cfg(), Plane::Read)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not configured"), "{err}");
+        assert!(err.contains("provisioner"), "{err}");
+    }
+
+    #[test]
+    fn a_disabled_profile_refuses_even_when_named_explicitly() {
+        let err = select_profile("retired", ParamSource::Flag, &cfg(), Plane::Read)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("disabled"), "{err}");
+        assert!(err.contains("stave profile enable retired"), "{err}");
+    }
+
+    #[test]
+    fn a_provisioning_profile_is_refused_from_the_stored_default() {
+        let err = select_profile("provisioner", ParamSource::Config, &cfg(), Plane::Provision)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot be the stored default"), "{err}");
+        assert!(err.contains("--profile provisioner"), "{err}");
+    }
+
+    #[test]
+    fn a_provisioning_profile_named_explicitly_is_allowed_on_its_own_plane() {
+        let p = select_profile("provisioner", ParamSource::Flag, &cfg(), Plane::Provision).unwrap();
+        assert_eq!(p.plane, Plane::Provision);
+    }
+
+    #[test]
+    fn the_read_binary_refuses_a_provisioning_profile() {
+        let err = select_profile("provisioner", ParamSource::Flag, &cfg(), Plane::Read)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("provision plane"), "{err}");
+        assert!(err.contains("read plane"), "{err}");
+    }
+
+    #[test]
+    fn an_undeclared_binary_plane_defaults_to_the_stricter_answer() {
+        // BINARY_PLANE unset must mean Read, so a binary that forgets
+        // to declare itself cannot reach a provisioning credential.
+        assert_eq!(binary_plane(), Plane::Read);
+    }
+
+    #[test]
+    fn an_unrecognized_plane_is_fatal_rather_than_defaulting() {
+        let mut c = cfg();
+        c.profile.get_mut("reader").unwrap().plane = Some("admin".into());
+        let err = select_profile("reader", ParamSource::Flag, &c, Plane::Read)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be `read` or `provision`"), "{err}");
+    }
+
+    #[test]
+    fn an_absent_plane_means_read() {
+        let mut c = cfg();
+        c.profile.get_mut("reader").unwrap().plane = None;
+        let p = select_profile("reader", ParamSource::Flag, &c, Plane::Read).unwrap();
+        assert_eq!(p.plane, Plane::Read);
+    }
+
+    #[test]
+    fn an_absent_enabled_key_means_enabled() {
+        let parsed: Config = toml::from_str("[profile.p]\nclient_id = \"x\"\n").expect("parses");
+        assert!(parsed.profile["p"].enabled);
+    }
+
+    #[test]
+    fn keyring_account_is_namespaced_per_profile() {
+        assert_eq!(keyring_client_secret_user("reader"), "client-secret:reader");
+        assert_ne!(
+            keyring_client_secret_user("reader"),
+            KEYRING_CLIENT_SECRET_USER
+        );
+    }
+
+    #[test]
+    fn a_profile_round_trips_through_toml() {
+        let rendered = toml::to_string(&cfg()).expect("serializes");
+        let parsed: Config = toml::from_str(&rendered).expect("parses");
+        assert_eq!(parsed.default.profile.as_deref(), Some("reader"));
+        assert!(!parsed.profile["retired"].enabled);
+        assert_eq!(
+            parsed.profile["provisioner"].plane.as_deref(),
+            Some("provision")
         );
     }
 }

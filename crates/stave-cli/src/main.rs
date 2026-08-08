@@ -47,7 +47,7 @@ const MAX_EMPTY_PAGES: usize = 10;
 const RECIPES: &[&str] = &["account-context", "severity-roll-up", "entity-hoist"];
 
 const CONFIG_KEYS: &str =
-    "client_id, api_url, posture, token_url, mcp.url, registry.host, registry.username";
+    "client_id, api_url, profile, posture, token_url, mcp.url, registry.host, registry.username";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -66,6 +66,12 @@ const CONFIG_KEYS: &str =
                   Unofficial: not affiliated with, sponsored by, or endorsed by Wiz, Inc."
 )]
 struct Cli {
+    /// Named service-account profile to use for this invocation.
+    /// Overrides `STAVE_PROFILE` and the stored default. A
+    /// provisioning profile MUST be named here or in the environment;
+    /// it can never be reached through the stored default.
+    #[arg(long, global = true, value_name = "NAME")]
+    profile: Option<String>,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -78,6 +84,8 @@ enum Cmd {
     Registry(RegistryArgs),
     /// Inspect or modify the persisted config.
     Config(ConfigArgs),
+    /// Manage named service-account profiles.
+    Profile(ProfileArgs),
     /// List or show curated GraphQL operations.
     Ops(OpsArgs),
     /// Run a curated operation by name, or an ad-hoc GraphQL document.
@@ -276,6 +284,61 @@ struct RegistryLoginArgs {
     /// Read the password from stdin (entire stream, trimmed).
     #[arg(long)]
     stdin: bool,
+}
+
+// ---------------------------------------------------------------------------
+// profile
+// ---------------------------------------------------------------------------
+
+#[derive(clap::Args, Debug)]
+struct ProfileArgs {
+    #[command(subcommand)]
+    cmd: ProfileCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum ProfileCmd {
+    /// List configured profiles. Client IDs are never printed.
+    List,
+    /// Show one profile.
+    Show {
+        /// Profile name.
+        name: String,
+    },
+    /// Create or update a profile. Store its secret afterwards with
+    /// `stave auth login --profile <name>`.
+    Add {
+        /// Profile name.
+        name: String,
+        /// Service-account client ID.
+        #[arg(long)]
+        client_id: String,
+        /// What this credential is for.
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Plane this credential belongs to.
+        #[arg(long, default_value = "read", value_parser = ["read", "provision"])]
+        plane: String,
+        /// Endpoint override (rarely needed; normally derived).
+        #[arg(long)]
+        api_url: Option<String>,
+    },
+    /// Remove a profile from the config. Does not touch the keyring.
+    Remove {
+        /// Profile name.
+        name: String,
+    },
+    /// Re-enable a disabled profile.
+    Enable {
+        /// Profile name.
+        name: String,
+    },
+    /// Disable a profile locally. It then refuses to resolve even when
+    /// named explicitly.
+    Disable {
+        /// Profile name.
+        name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +710,121 @@ struct McpCallArgs {
 // main
 // ---------------------------------------------------------------------------
 
+fn run_profile(args: ProfileArgs) -> anyhow::Result<()> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    match args.cmd {
+        ProfileCmd::List => {
+            let cfg = auth::read_config()
+                .map_err(|e| anyhow!("{e}"))?
+                .unwrap_or_default();
+            let default = cfg.default.profile.clone();
+            // Client IDs are deliberately absent: they are credential
+            // identifiers (tenant-data-hygiene class 4), and what an
+            // operator needs to pick a profile is its purpose and plane.
+            for (name, p) in &cfg.profile {
+                let record = json!({
+                    "name": name,
+                    "plane": p.plane.clone().unwrap_or_else(|| "read".into()),
+                    "purpose": p.purpose,
+                    "enabled": p.enabled,
+                    "default": default.as_deref() == Some(name.as_str()),
+                    "has_secret": auth::profile_secret_present(name),
+                });
+                writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
+            }
+            Ok(())
+        }
+        ProfileCmd::Show { name } => {
+            let cfg = auth::read_config()
+                .map_err(|e| anyhow!("{e}"))?
+                .unwrap_or_default();
+            let p = cfg
+                .profile
+                .get(&name)
+                .ok_or_else(|| anyhow!("profile {name:?} is not configured"))?;
+            let record = json!({
+                "name": name,
+                "plane": p.plane.clone().unwrap_or_else(|| "read".into()),
+                "purpose": p.purpose,
+                "enabled": p.enabled,
+                "api_url": p.api_url,
+                "default": cfg.default.profile.as_deref() == Some(name.as_str()),
+                "has_secret": auth::profile_secret_present(&name),
+            });
+            writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
+            Ok(())
+        }
+        ProfileCmd::Add {
+            name,
+            client_id,
+            purpose,
+            plane,
+            api_url,
+        } => {
+            let path = auth::write_config(|cfg| {
+                let entry = cfg.profile.entry(name.clone()).or_default();
+                entry.client_id = Some(client_id.clone());
+                entry.plane = Some(plane.clone());
+                if purpose.is_some() {
+                    entry.purpose = purpose.clone();
+                }
+                if api_url.is_some() {
+                    entry.api_url = api_url.clone();
+                }
+            })
+            .map_err(|e| anyhow!("{e}"))?;
+            eprintln!(
+                "profile {name:?} written to {}\n  next: stave auth login --profile {name}",
+                path.display()
+            );
+            Ok(())
+        }
+        ProfileCmd::Remove { name } => {
+            let mut existed = false;
+            auth::write_config(|cfg| {
+                existed = cfg.profile.remove(&name).is_some();
+                if cfg.default.profile.as_deref() == Some(name.as_str()) {
+                    cfg.default.profile = None;
+                }
+            })
+            .map_err(|e| anyhow!("{e}"))?;
+            if !existed {
+                return Err(anyhow!("profile {name:?} is not configured"));
+            }
+            // The keyring entry is deliberately left alone: removing a
+            // profile is a config edit, and silently destroying a
+            // secret would make it unrecoverable from a typo.
+            eprintln!(
+                "profile {name:?} removed. Its keyring secret is untouched; \
+                 delete it with `stave auth logout --profile {name}`."
+            );
+            Ok(())
+        }
+        ProfileCmd::Enable { name } => set_enabled(&name, true),
+        ProfileCmd::Disable { name } => set_enabled(&name, false),
+    }
+}
+
+fn set_enabled(name: &str, enabled: bool) -> anyhow::Result<()> {
+    let mut found = false;
+    auth::write_config(|cfg| {
+        if let Some(entry) = cfg.profile.get_mut(name) {
+            entry.enabled = enabled;
+            found = true;
+        }
+    })
+    .map_err(|e| anyhow!("{e}"))?;
+    if !found {
+        return Err(anyhow!("profile {name:?} is not configured"));
+    }
+    eprintln!(
+        "profile {name:?} {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+    Ok(())
+}
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -657,6 +835,12 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
+    // Declare this binary's plane before any credential resolution, so
+    // a provisioning profile cannot be reached from the read CLI.
+    auth::set_binary_plane(auth::Plane::Read);
+    if let Some(name) = cli.profile.as_deref() {
+        auth::set_profile_override(name);
+    }
     let cmd = match cli.cmd {
         Some(c) => c,
         None => {
@@ -672,6 +856,7 @@ fn main() -> ExitCode {
         Cmd::Auth(args) => run_auth(args),
         Cmd::Registry(args) => run_registry(args),
         Cmd::Config(args) => run_config(args),
+        Cmd::Profile(args) => run_profile(args),
         Cmd::Ops(args) => run_ops(args),
         Cmd::Api(args) => run_api(args),
         Cmd::List(args) => run_list(args),
@@ -710,6 +895,22 @@ fn run_auth(args: AuthArgs) -> anyhow::Result<()> {
     }
 }
 
+/// The profile named for this invocation, if any.
+///
+/// `auth login` and `auth logout` must key the keyring by profile
+/// WITHOUT going through `resolve_profile`, which refuses a profile
+/// that is not yet in the config file. Enrolling a brand-new profile is
+/// exactly the case where that refusal would be wrong.
+fn active_profile_name() -> Option<String> {
+    if let Some(v) = auth::profile_override() {
+        return Some(v);
+    }
+    std::env::var(auth::PROFILE_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
     // Client ID first, so the prompts read in the order a person expects
     // and so a --stdin secret is never consumed by an ID prompt.
@@ -720,14 +921,32 @@ fn auth_login(args: AuthLoginArgs) -> anyhow::Result<()> {
 
     let secret = read_secret(args.stdin, "Wiz client secret: ", "--client-id")?;
 
-    auth::store_client_secret(&secret).map_err(|e| anyhow!("{e}"))?;
-    match auth::read_client_secret_keyring() {
-        Some(_) => eprintln!("stave auth: client secret stored in the platform keyring"),
-        None => eprintln!(
-            "stave auth: client secret written, but reading it back failed. The keyring \
+    // With `--profile <name>` active, the secret is keyed to that
+    // profile so several service accounts coexist in the keyring.
+    // Without one, the unnamed entry is used exactly as before.
+    let active = active_profile_name();
+    let stored_back = match active.as_deref() {
+        Some(name) => {
+            auth::store_profile_secret(name, &secret).map_err(|e| anyhow!("{e}"))?;
+            auth::profile_secret_present(name)
+        }
+        None => {
+            auth::store_client_secret(&secret).map_err(|e| anyhow!("{e}"))?;
+            auth::read_client_secret_keyring().is_some()
+        }
+    };
+    let whose = match active.as_deref() {
+        Some(name) => format!("client secret for profile {name:?}"),
+        None => "client secret".to_string(),
+    };
+    if stored_back {
+        eprintln!("stave auth: {whose} stored in the platform keyring");
+    } else {
+        eprintln!(
+            "stave auth: {whose} written, but reading it back failed. The keyring \
              backend may be unavailable; set {} instead.",
             auth::CLIENT_SECRET_ENV
-        ),
+        );
     }
 
     let api_url = args
@@ -881,9 +1100,17 @@ fn auth_status() -> anyhow::Result<()> {
 }
 
 fn auth_logout() -> anyhow::Result<()> {
-    let secret_removed = auth::delete_client_secret_keyring().map_err(|e| anyhow!("{e}"))?;
+    let active = active_profile_name();
+    let secret_removed = match active.as_deref() {
+        Some(name) => auth::delete_profile_secret(name).map_err(|e| anyhow!("{e}"))?,
+        None => auth::delete_client_secret_keyring().map_err(|e| anyhow!("{e}"))?,
+    };
+    let whose = match active.as_deref() {
+        Some(name) => format!("client secret for profile {name:?}"),
+        None => "client secret".to_string(),
+    };
     if secret_removed {
-        eprintln!("stave auth: client secret removed from the keyring");
+        eprintln!("stave auth: {whose} removed from the keyring");
     } else {
         eprintln!("stave auth: no keyring entry to remove");
     }
@@ -1205,6 +1432,13 @@ fn config_set(key: &str, value: &str) -> anyhow::Result<()> {
     let path = match key {
         "client_id" => auth::write_config(|cfg| cfg.auth.client_id = Some(owned)),
         "api_url" => auth::write_config(|cfg| cfg.default.api_url = Some(owned)),
+        // Deliberately a config edit rather than a `profile use` verb.
+        // gcloud's `activate` and spacectl's `select` read as a mode
+        // switch; naming this what it is keeps the stored default
+        // visibly persistent state. A provision-plane profile set here
+        // is refused at resolution, not at write time, so the refusal
+        // names the call that would have used it.
+        "profile" => auth::write_config(|cfg| cfg.default.profile = Some(owned)),
         "token_url" => auth::write_config(|cfg| cfg.auth.token_url = Some(owned)),
         "posture" => {
             match trimmed {
@@ -1239,6 +1473,7 @@ fn config_unset(key: &str) -> anyhow::Result<()> {
     let path = match key {
         "client_id" => auth::write_config(|cfg| cfg.auth.client_id = None),
         "api_url" => auth::write_config(|cfg| cfg.default.api_url = None),
+        "profile" => auth::write_config(|cfg| cfg.default.profile = None),
         "token_url" => auth::write_config(|cfg| cfg.auth.token_url = None),
         "posture" => auth::write_config(|cfg| cfg.default.posture = None),
         "mcp.url" => auth::write_config(|cfg| cfg.mcp.url = None),
