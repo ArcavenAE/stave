@@ -184,6 +184,41 @@ field_layer() {
                     # populated. Discloses nothing; the value is still
                     # gone in every non-null case.
                     elif $in[$k] == null then null
+                    # A denied field that is a GraphQL CONNECTION keeps
+                    # its pagination metadata and loses everything else.
+                    # Without this a truncated NESTED connection is
+                    # invisible to the operator: the container is
+                    # redacted whole, so totalCount and hasNextPage go
+                    # with it, and "20 controls" and "20 of 4000
+                    # controls" render identically. The top-level
+                    # pageInfo is not affected either way, because the
+                    # CLI consumes it for paging and it never reaches
+                    # the operator.
+                    #
+                    # ONLY a number and a boolean can escape here, by
+                    # type guard rather than by field name. No string
+                    # survives this path, so no name, id, free text, or
+                    # cursor can. endCursor is deliberately absent: the
+                    # hygiene rule notes cursors can embed tenant data,
+                    # and hasNextPage answers the truncation question
+                    # without it. `nodes` is never reached.
+                    #
+                    # Counts were already accepted as non-identifying by
+                    # the policy this scrubber already had: the allowlist
+                    # carries issueCount, resourceCount,
+                    # criticalSeverityCount and a dozen siblings.
+                    elif (($in[$k] | type) == "object")
+                         and (($in[$k] | has("nodes"))
+                              or ($in[$k] | has("pageInfo"))
+                              or ($in[$k] | has("totalCount")))
+                    then
+                      ($in[$k]) as $c
+                      | { "_redacted": $k }
+                        + (if ($c.totalCount | type) == "number"
+                           then { totalCount: $c.totalCount } else {} end)
+                        + (if (($c.pageInfo | type) == "object")
+                              and (($c.pageInfo.hasNextPage | type) == "boolean")
+                           then { hasNextPage: $c.pageInfo.hasNextPage } else {} end)
                     else "<redacted:\($k)>"
                     end ) })
       elif type == "array" then map(scrub($safe; $extra))
@@ -523,6 +558,59 @@ selftest() {
     printf 'ok   %-28s\n' "null: only null takes that path"
   else
     printf 'FAIL %-28s a non-null took the null path: %s\n' "null: only null" "$nulls" >&2
+    fail=1
+  fi
+
+  # A denied field that is a GraphQL connection keeps its pagination
+  # metadata. Without this, a truncated NESTED connection is invisible:
+  # "20 controls" and "20 of 4000 controls" render identically, so an
+  # operator cannot tell a complete answer from a clipped one. Found
+  # 2026-08-07 when queue item 3 could not read totalCount or the inner
+  # hasNextPage on SecurityFramework.controls (aae-orc-x7iv).
+  local conn
+  conn="$(printf '%s\n' '{"_kind":"security_framework","id":"f1","controls":{"totalCount":4000,"nodes":[{"id":"c1","name":"SECRET-CONTROL"}],"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR-CARRYING-TENANT-DATA"}}}' | run_scrub)"
+  if printf '%s' "$conn" | grep -q '"totalCount":4000' \
+    && printf '%s' "$conn" | grep -q '"hasNextPage":true' \
+    && printf '%s' "$conn" | grep -q '"_redacted":"controls"'; then
+    printf 'ok   %-28s\n' "connection: metadata survives"
+  else
+    printf 'FAIL %-28s metadata did not survive: %s\n' "connection: metadata" "$conn" >&2
+    fail=1
+  fi
+  # The negative half, and the one that matters: everything else in the
+  # container is still gone. The cursor is excluded deliberately — the
+  # hygiene rule notes cursors can embed tenant data, and hasNextPage
+  # answers the truncation question without it.
+  if ! printf '%s' "$conn" | grep -q 'SECRET-CONTROL' \
+    && ! printf '%s' "$conn" | grep -q 'CURSOR-CARRYING-TENANT-DATA' \
+    && ! printf '%s' "$conn" | grep -q '"endCursor"' \
+    && ! printf '%s' "$conn" | grep -q '"nodes"'; then
+    printf 'ok   %-28s\n' "connection: nodes and cursor gone"
+  else
+    printf 'FAIL %-28s container contents escaped: %s\n' "connection: contents" "$conn" >&2
+    fail=1
+  fi
+  # The escape is a TYPE guard, not a field-name guard: only a number
+  # and a boolean can pass. If it were keyed on the field name, a
+  # string-valued totalCount would carry arbitrary text straight out.
+  local conntype
+  conntype="$(printf '%s\n' '{"_kind":"security_framework","controls":{"totalCount":"LEAK-VIA-TOTALCOUNT","nodes":[],"pageInfo":{"hasNextPage":"LEAK-VIA-HASNEXTPAGE"}}}' | run_scrub)"
+  if ! printf '%s' "$conntype" | grep -q 'LEAK-VIA' \
+    && printf '%s' "$conntype" | grep -q '"_redacted":"controls"'; then
+    printf 'ok   %-28s\n' "connection: only num and bool"
+  else
+    printf 'FAIL %-28s a string escaped the type guard: %s\n' "connection: type guard" "$conntype" >&2
+    fail=1
+  fi
+  # A denied object that is NOT a connection is still redacted whole.
+  # The escape must not have widened every nested object by accident.
+  local nonconn
+  nonconn="$(printf '%s\n' '{"_kind":"issue","assignee":{"name":"Real Person","email":"a@b.example"}}' | run_scrub)"
+  if printf '%s' "$nonconn" | grep -q '"assignee":"<redacted:assignee>"' \
+    && ! printf '%s' "$nonconn" | grep -q 'Real Person'; then
+    printf 'ok   %-28s\n' "connection: non-connection whole"
+  else
+    printf 'FAIL %-28s a plain object stopped being redacted whole: %s\n' "connection: non-conn" "$nonconn" >&2
     fail=1
   fi
 

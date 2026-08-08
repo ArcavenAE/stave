@@ -116,6 +116,16 @@ Also stop when you're about to:
   stave JSONL plus structural patterns over any text.
   `scripts/scrub.sh --selftest` proves every rule fires, using
   synthetic values only, and needs no tenant.
+  Two deliberate exceptions to "a denied field becomes
+  `<redacted:name>`", both narrow and both selftested. A literal `null`
+  stays `null`, because absence is not tenant data and collapsing it
+  into the redaction string made unpopulated and populated
+  indistinguishable. A denied field that is a GraphQL **connection**
+  keeps `totalCount` and `pageInfo.hasNextPage`, by type guard: only a
+  number and a boolean can pass, so no name, id, free text, or cursor
+  can. Without it a truncated nested connection is invisible — and the
+  first real record read after the change turned out to be truncated
+  (139 controls fetched at `first: 100`).
 - `scripts/check-tenant-leaks.sh` is the DETECTOR (trigger 2), run by
   pre-commit (lefthook) and CI.
 - Both read `scripts/leak-patterns.sh`, so a pattern added once is

@@ -360,7 +360,25 @@ and how much rides on it:
    `first: 100` apply, does `totalCount` return, and what does the
    response actually cost. Check at `--limit 1` first.
 
-   *Partly settled 2026-08-07, live at `--limit 1`.* The document
+   ***Settled 2026-08-08.*** All three questions answered, and the
+   answer to the last one is a defect. `totalCount` and the inner
+   `hasNextPage` both return; they were unreadable only because our own
+   scrubber redacted the container whole (`aae-orc-x7iv`, fixed). With
+   that fixed, the first real record read said:
+
+   | Nested connection | `totalCount` | `hasNextPage` |
+   |---|---|---|
+   | `controls` | 139 | **true** |
+   | `cloudConfigurationRules` | 27 | false |
+
+   The document requests both at `first: 100`, so 39 controls are
+   silently dropped, and nothing in the response, the exit code, or the
+   audit line says so. That was undetectable by construction before
+   today: a complete answer and a clipped one rendered byte-identically.
+   Filed as `aae-orc-yet2` — stave has no surface for paging an inner
+   connection, so raising the number only moves the cliff.
+
+   *Earlier partial answer, 2026-08-07, live at `--limit 1`.* The document
    validates and the server answers: exit 0, one record, 1041ms, 323
    bytes of scrubbed output. So the cost question is answered and the
    selection is real. `totalCount` and the inner `hasNextPage` are
