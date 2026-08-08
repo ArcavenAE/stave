@@ -17,10 +17,12 @@ partial-data marker.
 
 Twenty records each, no record carrying a missing field.
 
-## The sweep, which narrows this a great deal
+## The sweep: all twelve kinds, and the gap is exactly two
 
-Six kinds already had data in this run, so the selected-versus-arrived
-comparison cost nothing to extend. Top-level node fields only:
+Six kinds already had data, so that half cost nothing. The remaining six
+were read once each in run `FIELD-SWEEP-20260808T010628Z` (bd
+`aae-orc-k5o7`), bounded at `--limit 20`, under the coach gate,
+reconciled 6/6 with no bypass. Top-level node fields only.
 
 | Kind | Selected | Arrived | Missing |
 |---|---|---|---|
@@ -28,18 +30,27 @@ comparison cost nothing to extend. Top-level node fields only:
 | `vulnerability_finding` | 16 | 16 | — |
 | `project` | 9 | 9 | — |
 | `security_framework` | 6 | 6 | — |
+| `report` | 2 | 2 | — |
+| `control` | 8 | 8 | — |
+| `user` | 7 | 7 | — |
+| `service_account` | 9 | 9 | — |
+| `cloud_resource` | 6 | 6 | — |
+| `cloud_config_rule` | 5 | 5 | — |
 | `audit_log` | 8 | 4 | four, above |
 | `cloud_account` | 11 | 6 | five, above |
 
-**Four of six kinds are complete.** So this is not a general property of
-the tenant, the transport, or stave's pipeline — those would not spare
-nineteen fields on `issue` and then drop five on `cloud_account`. It is
-localised to two kinds, and within an affected kind it is field-level
-rather than wholesale.
+**Ten of twelve are complete.** `report` returned 1 record and
+`service_account` 12; both are tenant counts below the limit, not
+truncation.
 
-That narrowing matters for the blast radius below: the caveat is not
-"every absence anywhere is suspect," it is "absence on a kind with a
-known gap is suspect, and no kind is known-clean until swept."
+So this is not a general property of the tenant, the transport, or
+stave's pipeline — none of those would spare nineteen fields on `issue`
+and then drop five on `cloud_account`. It is **confined to two kinds**,
+and field-level within them.
+
+That is a much better answer than the one this finding opened with. The
+caveat below is no longer "no kind is known-clean until swept" — ten are
+now known-clean, and an absent field on any of them means what it says.
 
 One shape worth recording without a theory attached, because it is the
 kind of pattern that invites one. On `cloud_account` the six that arrive
@@ -119,11 +130,12 @@ supported, and the sweep made it less likely rather than more.
 
 It changes what a class of already-published readings can mean.
 
-**Unsafe from here on:** "field absent, therefore the tenant has no
-data." Absence now has at least two causes and the run cannot tell them
-apart. The sweep bounds this rather than removing it: on the four clean
-kinds an absent field would be a real absence, and the six unswept kinds
-are simply unknown.
+**Unsafe, but now on exactly two kinds:** "field absent, therefore the
+tenant has no data" holds on the ten clean kinds and does not hold on
+`audit_log` or `cloud_account`, where absence has two possible causes
+and the run cannot tell them apart. This is the version after the full
+sweep; before it the caveat had to be read as applying everywhere, which
+is what made the sweep worth doing ahead of the mechanism.
 
 **Unaffected:** "key present with an explicit null." That is a real
 answer from the server about a field it chose to return.
@@ -139,15 +151,27 @@ The one row that does change is B10, whose surface fix has already
 shipped and did not open the step, and which is now the only row where
 SURFACE versus TENANT is undetermined.
 
-## The cheapest discriminator
+## The discriminator, and a cheaper route to it than first thought
 
-Run the same two reads under a service account with known-broader
-scopes and diff the key sets. If the missing fields appear, silent
-stripping is confirmed and the partition question becomes a scope-map
-question. If they do not, the hypothesis is dead and the omission needs
-its own explanation.
+The original plan was to run the same two reads under a service account
+with known-broader scopes and diff the key sets. That works, and it
+depends on someone provisioning a second account.
 
-This needs no new capability, and no write of any kind.
+The sweep turned up a route that may not: **`ServiceAccount.scopes`
+arrives and is populated, 12 of 12.** That is exactly the field bd
+`aae-orc-8af5` exists to probe, opened because charter F1 records that
+the token itself would not expose granted scopes. The scrubber withholds
+the values, so this establishes only that the field resolves and is
+non-empty — which is the first thing `8af5` asks.
+
+If our own account's granted scopes are readable that way, the
+correlation this finding needs (do the missing fields line up with
+scopes we lack?) becomes testable against the account we already have.
+That would remove the provisioning dependency from the discriminator
+entirely. Stated as a route to try, not a result: nothing here has read
+a scope value.
+
+Either way, no write of any kind.
 
 ## A method note that is not incidental
 

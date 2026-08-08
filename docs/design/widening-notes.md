@@ -386,14 +386,20 @@ and how much rides on it:
    | `AuditLogEntry.user`/`.serviceAccount` → `performer` | **cannot be evaluated.** The key does not arrive — finding-006 |
    | `CloudAccount.status` → `criticalSystemHealthIssueCount`, `highSystemHealthIssueCount` | **cannot be evaluated.** Neither key arrives — finding-006 |
    | `CloudAccount.connector` → `sourceDeployments` | **cannot be evaluated.** Key does not arrive — finding-006 |
-   | `User.role` → `effectiveRole` | not attempted |
+   | `User.role` → `effectiveRole` | **populated 20/20.** Settled 2026-08-08 in the field-sweep run |
 
-   The three that settled cost no tenant calls at all; they fell out of
-   data the run had already collected. The three that are blocked are
-   blocked by the same thing, and it is neither the substitution nor the
-   tenant: see `_kos/findings/finding-006-the-server-answers-a-subset-of-what-was-asked.md`
+   **Four of seven settled, three blocked.** Three of the four cost no
+   tenant calls at all; they fell out of data an earlier run had already
+   collected. The fourth came free with the field sweep.
+
+   The three that are blocked are blocked by one thing, and it is
+   neither the substitution nor the tenant: see
+   `_kos/findings/finding-006-the-server-answers-a-subset-of-what-was-asked.md`
    and bd `aae-orc-i8cj`. Until that settles, a substitution whose key
-   does not arrive tells us nothing about the substitution.
+   does not arrive tells us nothing about the substitution. Note that
+   all three sit on `audit_log` and `cloud_account`, which the full
+   twelve-kind sweep confirmed are the only two affected kinds — so this
+   is a bounded blocker, not an open-ended one.
 5. **The joined scopes.** Whether the nested-field permission model
    exists at all, before whether the names are right.
 6. **The exposure-boolean question** under type surprises. If
