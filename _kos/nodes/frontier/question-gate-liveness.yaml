@@ -51,7 +51,8 @@ content: |
   pre-change one.
 edges:
   - target: elem-control-scope-matches-reviewer-scope
-    type: relates
+    type: instantiates
+    note: "a snapshotted gate is a control that cannot range over a hazard discovered while it runs; the open case of that rule"
 provenance:
   created_by: human
   session: "2026-08-07"

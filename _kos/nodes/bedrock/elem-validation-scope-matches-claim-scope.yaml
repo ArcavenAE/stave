@@ -56,9 +56,11 @@ content: |
   about scope, one on the guard and one on the evidence.
 edges:
   - target: elem-control-scope-matches-reviewer-scope
-    type: relates
+    type: supports
+    note: "sibling rule on the guard side; same mistake about scope, one on the control and one on the evidence"
   - target: question-partial-field-resolution
-    type: relates
+    type: supports
+    note: "corollary 2 is why the ten-kind sweep bounded that question before any mechanism was proposed"
 provenance:
   created_by: human
   session: "2026-08-08"

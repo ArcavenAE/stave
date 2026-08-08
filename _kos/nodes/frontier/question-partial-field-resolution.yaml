@@ -60,9 +60,11 @@ content: |
   runbook attemptability table rests on.
 edges:
   - target: elem-validation-scope-matches-claim-scope
-    type: relates
+    type: instantiates
+    note: "bounded to exactly two kinds before any mechanism was proposed; corollary 2 of that rule in practice"
   - target: elem-second-route-when-the-credential-will-not-say
-    type: relates
+    type: derives
+    note: "sub-question a is grounded in the directory route; if that route changes, the discriminator does too"
 provenance:
   created_by: human
   session: "2026-08-08"

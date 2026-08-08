@@ -82,9 +82,11 @@ content: |
   [[elem-validation-scope-matches-claim-scope]].
 edges:
   - target: question-gate-liveness
-    type: relates
+    type: supports
+    note: "that question is the open end of this rule: where a control must live so it can range over what it reviews while running"
   - target: elem-validation-scope-matches-claim-scope
-    type: relates
+    type: supports
+    note: "sibling rule on the evidence side; same mistake about scope, one on the control and one on the evidence"
 provenance:
   created_by: human
   session: "2026-08-07"
