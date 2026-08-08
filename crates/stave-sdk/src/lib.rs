@@ -15,6 +15,7 @@ pub mod audit;
 pub mod auth;
 pub mod cel;
 pub mod client;
+pub mod directory;
 pub mod enrich;
 pub mod error;
 pub mod kinds;
@@ -26,6 +27,7 @@ pub mod token;
 
 pub use auth::{ParamSource, ResolvedParam, ResolvedSecret, SecretSource};
 pub use client::{ACCESS_TOKEN_ENV, BASE_URL_ENV, CallOptions, Client};
+pub use directory::{DirectoryScopes, own_scopes};
 pub use error::{Result, StaveError};
 pub use kinds::{KindSpec, all_kinds, extract_items, kind_spec};
 pub use mcp::{McpClient, McpTool};

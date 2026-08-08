@@ -190,12 +190,25 @@ exist → `nativeType`), `CloudAccount.status` (deprecated →
 `lastScannedAt`/`resourceCount`), and a sync-spec SDL bug (empty types
 emitted invalid `{}`).
 
-Open finding: with the service account used during development, scope
-qualification did not manifest as expected — the token did not expose
-readable granted scopes, so `auth can-i` and `auth plan --check` refuse
-to answer rather than emit a false verdict (option (a), ratified).
-`ops permissions` and `auth plan` provisioning are unaffected. Root
-cause and remedy require more study. See finding-001.
+Open finding, **resolved 2026-08-08 by finding-007**: with the service
+account used during development, scope qualification did not manifest as
+expected — the token did not expose readable granted scopes, so
+`auth can-i` and `auth plan --check` refused to answer rather than emit
+a false verdict (option (a), ratified). `ops permissions` and
+`auth plan` provisioning were unaffected. See finding-001.
+
+The token claim is still opaque and always will be. A second route now
+answers the question: `--from-directory` on `auth scopes`, `auth can-i`
+and `auth plan --check` reads the caller's own `ServiceAccount.scopes`
+from the tenant directory. Validated live — 79 scopes readable, and
+`missing: 0` against the twelve the registry declares, so those twelve
+names are real. Opt-in rather than a silent fallback, because the
+default must stay offline and deterministic.
+
+`SCOPE_METADATA_PROVISIONAL` stays `true`. Twelve scope NAMES are
+validated; the per-operation ASSIGNMENT is not, and a credential
+holding 79 scopes cannot distinguish a correct mapping from a generous
+one. Settling that needs a least-privilege credential.
 
 Scope qualifier added 2026-08-06: "largely resolved" covers field
 selections, not the read path. Every live probe so far ran at
@@ -216,8 +229,10 @@ The scope-qualification item now has a concrete route to try rather than
 an open question: `ServiceAccount.scopes`, tracked as bd `aae-orc-8af5`.
 The study itself is bd `aae-orc-cw9y`.
 
-Remaining: scope-qualification study, MCP transport (F3), and the
-composite-verb question (F4). `SCOPE_METADATA_PROVISIONAL` stays true.
+Remaining: MCP transport (F3) and the composite-verb question (F4). The
+scope-qualification study (`aae-orc-cw9y`) narrowed rather than closed:
+the readable-scope route exists, so what is left is the per-operation
+assignment, which needs a least-privilege credential.
 
 ### F2: Schema Introspection, get-by-id, and Server-Side Filters
 

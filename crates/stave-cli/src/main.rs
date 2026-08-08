@@ -135,13 +135,25 @@ enum AuthCmd {
     /// Remove the stored client secret and the cached token.
     Logout,
     /// List the scopes the current token carries (decoded from the
-    /// token at hand; no mint, no API call).
-    Scopes,
+    /// token at hand; no mint, no API call). With --from-directory,
+    /// look the caller's own account up in the tenant's service-account
+    /// directory instead, which costs one API call.
+    Scopes {
+        /// Read the caller's own granted scopes from the tenant's
+        /// service-account directory instead of the token claim. Costs
+        /// one API call. Use when the token's scopes are opaque.
+        #[arg(long)]
+        from_directory: bool,
+    },
     /// Answer whether the current token can run an operation. Exit 0
     /// yes, 1 no. Reads the token's scopes against the registry.
     CanI {
         /// Operation name. Run `stave ops list` to discover.
         operation: String,
+        /// Resolve granted scopes from the tenant's service-account
+        /// directory rather than the token claim. Costs one API call.
+        #[arg(long)]
+        from_directory: bool,
     },
     /// Print the least-privilege scope set to provision a service
     /// account for the selected operations, and the scopes to withhold.
@@ -164,6 +176,12 @@ struct AuthPlanArgs {
     /// Operations to plan for. Repeatable. Default: all curated.
     #[arg(long = "op", value_name = "NAME")]
     ops: Vec<String>,
+
+    /// Resolve granted scopes from the tenant's service-account
+    /// directory rather than the token claim. Only meaningful with
+    /// --check. Costs one API call.
+    #[arg(long)]
+    from_directory: bool,
 
     /// Compare the current token's scopes against the requirement and
     /// report missing vs excess. Exits nonzero on any drift.
@@ -683,8 +701,11 @@ fn run_auth(args: AuthArgs) -> anyhow::Result<()> {
         AuthCmd::Login(login) => auth_login(login),
         AuthCmd::Status => auth_status(),
         AuthCmd::Logout => auth_logout(),
-        AuthCmd::Scopes => auth_scopes(),
-        AuthCmd::CanI { operation } => auth_can_i(&operation),
+        AuthCmd::Scopes { from_directory } => auth_scopes(from_directory),
+        AuthCmd::CanI {
+            operation,
+            from_directory,
+        } => auth_can_i(&operation, from_directory),
         AuthCmd::Plan(plan) => auth_plan(plan),
     }
 }
@@ -1368,9 +1389,81 @@ fn resolved_token_scopes() -> stave_sdk::TokenScopes {
 /// grant-checking are impossible client-side; provisioning still works
 /// statically via `auth plan`.
 const OPAQUE_SCOPES_NOTE: &str = "this tenant's token encodes scopes as an opaque bitmask (encodedScopes), \
-     so stave cannot enumerate or check granted scopes from the token. Use \
-     `stave auth plan` for the least-privilege provisioning checklist, and set \
-     the service account's scopes in the Wiz portal.";
+     so stave cannot enumerate or check granted scopes from the token. Pass \
+     --from-directory to look the caller's own account up in the tenant's \
+     service-account directory instead (one API call). Use `stave auth plan` \
+     for the least-privilege provisioning checklist, and set the service \
+     account's scopes in the Wiz portal.";
+
+/// Granted scopes for the permission verbs, from whichever route the
+/// caller selected.
+///
+/// The token route is offline and is the default: `auth scopes` has
+/// always been a pure read of the token at hand, and silently turning
+/// it into a network call would break both that expectation and the
+/// determinism rule in `.claude/rules/cli-philosophy.md`. The directory
+/// route is therefore opt-in behind `--from-directory` rather than an
+/// automatic fallback.
+///
+/// Naming the flag in the failure text is deliberate and is NOT the
+/// wall/ladder problem: an opaque-scopes message is a *map* error (the
+/// caller is lost and there is a legitimate next step), not a guard
+/// refusal. Guard refusals still name nothing.
+fn granted_scopes(from_directory: bool) -> anyhow::Result<(Vec<String>, &'static str)> {
+    if !from_directory {
+        return match resolved_token_scopes() {
+            stave_sdk::TokenScopes::Readable { scopes, field } => Ok((scopes, field)),
+            stave_sdk::TokenScopes::Opaque { .. } => Err(anyhow!("{OPAQUE_SCOPES_NOTE}")),
+            stave_sdk::TokenScopes::Absent => Err(anyhow!(
+                "no token scopes available. Run `stave auth login` or set {}.",
+                ACCESS_TOKEN_ENV
+            )),
+        };
+    }
+
+    let client_id = stave_sdk::auth::resolve_client_id(None)
+        .map_err(|e| anyhow!("{e}"))?
+        .ok_or_else(|| {
+            anyhow!(
+                "--from-directory matches the caller's own account by client ID, and no \
+                 client ID is configured. Set it with `stave auth login`, \
+                 STAVE_CLIENT_ID, or `stave config set client_id`."
+            )
+        })?;
+
+    let found = block_on(async {
+        let client = stave_sdk::Client::from_env().await?;
+        stave_sdk::own_scopes(&client, &client_id.value).await
+    })
+    .map_err(|e| anyhow!("{e}"))?;
+
+    match found {
+        stave_sdk::DirectoryScopes::Found { scopes } => Ok((scopes, "directory")),
+        // A real answer about us, not a failed lookup — so it is not an
+        // error, but it is also not something to report as a grant set.
+        stave_sdk::DirectoryScopes::Empty => Err(anyhow!(
+            "the service-account directory lists this client ID with an empty scope list. \
+             That is the server's answer, not a lookup failure: the account appears to \
+             hold no scopes. Check the account's configuration in the Wiz portal."
+        )),
+        stave_sdk::DirectoryScopes::SelfNotListed { accounts_scanned } => Err(anyhow!(
+            "this client ID is not in the tenant's service-account directory ({} record(s) \
+             scanned). Either the directory does not list the caller, or the credential \
+             lacks the grant to see its own account. The token's own scopes remain opaque, \
+             so stave still cannot answer; `stave auth plan` gives the provisioning \
+             checklist without needing either route.",
+            accounts_scanned
+        )),
+        // DirectoryScopes is #[non_exhaustive]. A variant added later
+        // must not be silently read as a grant set — refusing is the
+        // only safe default for a permission verb.
+        other => Err(anyhow!(
+            "the service-account directory returned a result this build does not understand \
+             ({other:?}). Refusing rather than guessing at a grant set. Upgrade stave, or use \
+             `stave auth plan`."
+        )),
+    }
+}
 
 /// `read:all` is treated as granting any `read:*` scope. Provisional
 /// rule (D3) until F1 confirms Wiz's scope-implication semantics.
@@ -1384,14 +1477,30 @@ fn scope_granted(required: &str, granted: &[String]) -> bool {
     false
 }
 
-fn auth_scopes() -> anyhow::Result<()> {
+fn auth_scopes(from_directory: bool) -> anyhow::Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+
+    // The directory route reports its own source, so a consumer can
+    // tell a token-claim answer from a directory answer without
+    // guessing from the shape.
+    if from_directory {
+        let (scopes, source) = granted_scopes(true)?;
+        let record = json!({
+            "scopes": scopes,
+            "source": source,
+            "provisional": SCOPE_METADATA_PROVISIONAL,
+        });
+        writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
+        return Ok(());
+    }
+
     match resolved_token_scopes() {
         stave_sdk::TokenScopes::Readable { scopes, field } => {
             let record = json!({
                 "scopes": scopes,
                 "claim_field": field,
+                "source": "token",
                 "provisional": SCOPE_METADATA_PROVISIONAL,
             });
             writeln!(out, "{record}").map_err(|e| anyhow!("{e}"))?;
@@ -1415,25 +1524,13 @@ fn auth_scopes() -> anyhow::Result<()> {
     }
 }
 
-fn auth_can_i(operation: &str) -> anyhow::Result<()> {
+fn auth_can_i(operation: &str, from_directory: bool) -> anyhow::Result<()> {
     let op = ops::find(operation).map_err(|e| anyhow!("{e}"))?;
-    let granted = match resolved_token_scopes() {
-        stave_sdk::TokenScopes::Readable { scopes, .. } => scopes,
-        // Never report a false "no": if scopes are opaque we cannot
-        // decide grant membership, so say exactly that.
-        stave_sdk::TokenScopes::Opaque { .. } => {
-            return Err(anyhow!(
-                "cannot determine whether '{}' is permitted: {OPAQUE_SCOPES_NOTE}",
-                op.name
-            ));
-        }
-        stave_sdk::TokenScopes::Absent => {
-            return Err(anyhow!(
-                "no token scopes available to check against. Run `stave auth login` or set {}.",
-                ACCESS_TOKEN_ENV
-            ));
-        }
-    };
+    // Never report a false "no": every route that cannot decide grant
+    // membership returns an error saying so, rather than an empty
+    // grant set that would read as a denial.
+    let (granted, _source) = granted_scopes(from_directory)
+        .map_err(|e| anyhow!("cannot determine whether '{}' is permitted: {e}", op.name))?;
     let missing: Vec<&str> = op
         .required_scopes
         .iter()
@@ -1490,7 +1587,7 @@ fn auth_plan(args: AuthPlanArgs) -> anyhow::Result<()> {
     let grant_vec: Vec<String> = grant.iter().cloned().collect();
 
     if args.check {
-        return auth_plan_check(&grant_vec);
+        return auth_plan_check(&grant_vec, args.from_directory);
     }
 
     let stdout = std::io::stdout();
@@ -1541,25 +1638,17 @@ fn auth_plan(args: AuthPlanArgs) -> anyhow::Result<()> {
 /// `auth plan --check`: compare the token's scopes against the
 /// requirement, reporting MISSING (unusable) vs EXCESS
 /// (over-privileged) separately. Exits nonzero on any drift.
-fn auth_plan_check(required: &[String]) -> anyhow::Result<()> {
-    let granted = match resolved_token_scopes() {
-        stave_sdk::TokenScopes::Readable { scopes, .. } => scopes,
-        // Cannot compare against an opaque bitmask without reporting a
-        // false drift. Say so, and exit nonzero (the check did not pass).
-        stave_sdk::TokenScopes::Opaque { .. } => {
-            return Err(anyhow!(
-                "cannot check the credential against the requirement: {OPAQUE_SCOPES_NOTE} \
-                 The GRANT set to provision is: {}",
-                required.join(", ")
-            ));
-        }
-        stave_sdk::TokenScopes::Absent => {
-            return Err(anyhow!(
-                "no token scopes available to check against. Run `stave auth login` or set {}.",
-                ACCESS_TOKEN_ENV
-            ));
-        }
-    };
+fn auth_plan_check(required: &[String], from_directory: bool) -> anyhow::Result<()> {
+    // Cannot compare against an opaque bitmask without reporting a
+    // false drift. Every unresolvable route errors and exits nonzero
+    // (the check did not pass) rather than reporting phantom drift.
+    let (granted, _source) = granted_scopes(from_directory).map_err(|e| {
+        anyhow!(
+            "cannot check the credential against the requirement: {e} \
+             The GRANT set to provision is: {}",
+            required.join(", ")
+        )
+    })?;
     let missing: Vec<String> = required
         .iter()
         .filter(|s| !scope_granted(s, &granted))
