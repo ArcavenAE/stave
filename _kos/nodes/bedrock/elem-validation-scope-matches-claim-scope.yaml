@@ -1,0 +1,69 @@
+id: elem-validation-scope-matches-claim-scope
+type: element
+confidence: bedrock
+title: "A passing validation licenses only claims inside the scope it actually ran"
+content: |
+  Established 2026-08-08 from two independent instances in this repo,
+  four days apart, both found by someone going back and measuring
+  rather than by anyone reading the validation.
+
+  The rule:
+
+  > A validation that passes tells you the thing it exercised works.
+  > It does not tell you the thing it did not exercise works, and the
+  > gap is easiest to miss when the validation was BROAD, because
+  > breadth reads as thoroughness.
+
+  **Instance 1, finding-002.** `aae-orc-hzg0` closed on a read-only
+  sweep of all twelve curated kinds, 12 of 12 returning well-shaped
+  records, and charter F1 was marked "largely resolved" on that
+  evidence. The sweep ran at `--limit 2`, so every kind returned
+  exactly one page. Both live paging defects are properties of the
+  second page onward, and the validation could not have found either no
+  matter how many kinds it covered. One of them read a
+  twenty-thousand-record connection five records per request against a
+  live production tenant. Breadth across kinds was mistaken for depth
+  through the loop.
+
+  **Instance 2, finding-006.** Two kinds were observed returning fewer
+  fields than their document selects. The caveat first written was "no
+  kind is known-clean until swept" — correct, and unbounded. Sweeping
+  the other ten showed the gap is confined to exactly two, which turned
+  an open-ended warning into a bounded one. The sweep was run BEFORE
+  the mechanism was understood, deliberately, because bounding the
+  claim was worth more than explaining it.
+
+  Two corollaries the instances earn:
+
+  1. **State the axis the validation ranged over, next to the claim it
+     licenses.** "12 of 12 kinds at `--limit 2`" would have made the
+     depth gap visible at the moment the claim was written. "12 of 12
+     kinds" did not.
+  2. **When a defect is found in N of M things, sweep the other M-N
+     before theorising.** It is usually cheaper than the mechanism, it
+     bounds the blast radius immediately, and the bound survives even
+     if the mechanism is never explained.
+
+  Neither instance retracts the validation it criticises. hzg0's field
+  selections are live-validated and that claim stands. What is
+  retracted is the inference that a passing read means the read path is
+  exercised.
+
+  Sibling on the control side:
+  [[elem-control-scope-matches-reviewer-scope]]. That one says a
+  control cannot police what it does not range over; this one says a
+  validation cannot license what it did not exercise. Same mistake
+  about scope, one on the guard and one on the evidence.
+edges:
+  - target: elem-control-scope-matches-reviewer-scope
+    type: relates
+  - target: question-partial-field-resolution
+    type: relates
+provenance:
+  created_by: human
+  session: "2026-08-08"
+  created_at: "2026-08-08"
+  evidence:
+    - finding-002-paging-defects-hidden-by-single-page-validation
+    - finding-006-the-server-answers-a-subset-of-what-was-asked
+  open_test: "a validation that states its axis and is later found to have licensed a claim outside it would falsify the corollary, not the rule"

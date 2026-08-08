@@ -5,7 +5,8 @@ title: "A control cannot police what it does not range over"
 content: |
   Established 2026-08-07 from three defects in three independent
   controls, all found in one day, all by probing rather than reading.
-  Stated as one rule with two faces:
+  A third face was added 2026-08-08 from finding-003 and is at the
+  bottom; the two the rule was founded on are:
 
   **A control's exemption must key on something the control's own
   reviewer can see.** If the reviewer is deliberately blind to a value,
@@ -53,14 +54,43 @@ content: |
   case the sentence asserting the control was sound and the defect had
   the same author, which is the ordinary case and not a criticism. A
   reviewer reading for confirmation finds the sentence and stops.
+
+  **The measurement face, added 2026-08-08 from finding-003.** A
+  pre-registered gate predicate is a control, and its defects were the
+  same mistake computed rather than enforced. Three of its six:
+
+  - a conjunct **named for one property and defined on another** —
+    called compression, computed as stages-replaced-per-runbook, which
+    measures composition, so it could only be cleared by a verb that
+    bundles operations;
+  - a **stop-condition phrased on a count when its diagnosis was a
+    pattern** — "the predicate qualifies nothing in either set" did not
+    fire while the situation it existed for was substantially present;
+  - a **ratio registered without defining its denominator**, leaving
+    three defensible readings at the gate that happened to agree, which
+    is luck rather than design.
+
+  All six were invisible on paper and obvious the moment numbers
+  existed, which is the same discovery mode as the four above. So the
+  rule has three faces, not two: a control cannot police what it does
+  not range over, an allowlist decides shape rather than contents, and
+  **a measure is named for what you meant and computed on what you
+  wrote**. Only the third is checkable before data exists, by reading
+  the definition against the name — and nobody did.
+
+  Sibling on the evidence side:
+  [[elem-validation-scope-matches-claim-scope]].
 edges:
   - target: question-gate-liveness
+    type: relates
+  - target: elem-validation-scope-matches-claim-scope
     type: relates
 provenance:
   created_by: human
   session: "2026-08-07"
   created_at: "2026-08-07"
   evidence:
+    - finding-003-pre-registration-defects-found-by-running-it
     - finding-004-a-bypass-with-no-bypass-flag
     - finding-005-a-gate-you-cannot-change-while-it-runs
   open_test: "aae-orc-p3ne sweeps the remaining exemptions; a sweep that finds them all keyed correctly narrows this rule's urgency without falsifying it"

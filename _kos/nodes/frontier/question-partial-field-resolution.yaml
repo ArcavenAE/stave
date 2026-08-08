@@ -1,0 +1,72 @@
+id: question-partial-field-resolution
+type: question
+confidence: frontier
+title: "Why do two kinds return fewer fields than their document selects?"
+content: |
+  Opened 2026-08-08 by finding-006. Measured, bounded, and unexplained.
+
+  Two of twelve curated kinds silently return a proper subset of the
+  fields their document selects, with `result: ok`, no GraphQL error,
+  and no partial-data marker:
+
+  | Kind | Selected | Arrived | Missing |
+  |---|---|---|---|
+  | `audit_log` | 8 | 4 | actionType, actionParameters, sourceIP, performer |
+  | `cloud_account` | 11 | 6 | firstScannedAt, criticalSystemHealthIssueCount, highSystemHealthIssueCount, linkedProjects, sourceDeployments |
+
+  The other ten are complete. That bound is the most useful thing
+  established so far and it was established before any mechanism was
+  proposed, per [[elem-validation-scope-matches-claim-scope]].
+
+  Ruled out, each by measurement rather than argument: redaction (two
+  of the missing fields are on the scrubber allowlist, and a denied
+  field keeps its key); the scrubber dropping keys; nulls being elided
+  (`issue` carries three explicit nulls in the same run against the
+  same binary); per-kind projection in the SDK; and a stale binary (the
+  arrived set contains two fields only the widened document selects and
+  lacks the one field only the old document selected).
+
+  **Leading hypothesis, and it is weak: silent scope stripping.** A
+  server that drops fields the caller cannot read, rather than erroring
+  on them, produces this shape. Attractive because the same credential
+  would not expose its granted scopes through the token claim.
+
+  Against it, on one type: `resourceCount` arrives and
+  `criticalSystemHealthIssueCount` does not; `lastScannedAt` arrives
+  and `firstScannedAt` does not. Two counts and two timestamps landing
+  on opposite sides of the line is hard to tell a scope story about.
+  The ten-clean-kinds sweep pushed it further down: a scope model would
+  have to grant every field on `issue` and `vulnerability_finding` and
+  then split `cloud_account` down the middle.
+
+  Sub-questions:
+
+  a. Does the same read under a broader-scoped credential return the
+     missing fields? This is the discriminator. It originally required
+     provisioning a second service account; the directory route in
+     [[elem-second-route-when-the-credential-will-not-say]] may make it
+     answerable with the credential already in hand, by correlating the
+     missing fields against the 79 readable grants.
+  b. If not scopes, what partitions the two sets? Nothing in the schema
+     marks these fields as different from their neighbours.
+  c. Is the partition stable, or does it move with tenant state? Every
+     measurement so far is one sample per kind.
+  d. Do the two affected kinds share anything the other ten do not?
+
+  **Why it outranks its size.** It changes what an absence can mean.
+  "Field absent, therefore the tenant has no data" holds on the ten
+  clean kinds and does not hold on these two. Readings of the form "key
+  present with an explicit null" are unaffected, which is what the
+  runbook attemptability table rests on.
+edges:
+  - target: elem-validation-scope-matches-claim-scope
+    type: relates
+  - target: elem-second-route-when-the-credential-will-not-say
+    type: relates
+provenance:
+  created_by: human
+  session: "2026-08-08"
+  created_at: "2026-08-08"
+  evidence:
+    - finding-006-the-server-answers-a-subset-of-what-was-asked
+  tracked_as: aae-orc-i8cj
