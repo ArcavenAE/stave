@@ -393,7 +393,15 @@ fn ops_list_emits_one_record_per_curated_operation() {
     let out = offline(&["ops", "list"]);
     assert!(out.status.success(), "{out:?}");
     let records = jsonl(&stdout_of(&out));
-    assert_eq!(records.len(), 13, "the v0.1 library has 13 operations");
+    // Pinned against stave_api::OPERATIONS rather than restated, so the
+    // count lives in one place. What this test is actually for is that
+    // `ops list` emits one record per registered operation, which a
+    // hardcoded number tests only by coincidence.
+    assert_eq!(
+        records.len(),
+        stave_sdk::ops::all().len(),
+        "ops list did not emit one record per curated operation"
+    );
     assert_eq!(records[0]["_kind"], "operation");
     assert_eq!(records[0]["name"], "list_issues");
     assert_eq!(records[0]["root_field"], "issuesV2");

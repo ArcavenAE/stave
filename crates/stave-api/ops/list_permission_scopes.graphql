@@ -1,0 +1,37 @@
+# bd aae-orc-kuqt. The tenant's scope VOCABULARY, as distinct from what
+# any one account is GRANTED. Every scope result before this one had to
+# hedge on that difference: `auth scopes --from-directory` reads one
+# account's grants, so an absent name is consistent both with the tenant
+# lacking the scope and with the account simply not holding it. This
+# root separates the two.
+#
+# Selection is UNVALIDATED against the live API (charter B2, F1). Every
+# field here exists on PermissionScope in the vendored schema
+# (spec/, `type PermissionScope implements Node`), which is the same
+# guarantee the other curated documents carry and no more.
+#
+# `isProjectScope` is selected deliberately rather than for completeness:
+# it says which scopes can be narrowed by assignedProjectIds, which the
+# credential plane currently designs around without knowing.
+#
+# `filterBy` accepts PermissionScopeFilters (isProjectScope, permission,
+# resourceName, search) and is not declared here. Adding variables is
+# aae-orc-j1xi's territory, and this document should not be the place
+# that decides the filter surface.
+query ListPermissionScopes($first: Int, $after: String) {
+  permissionScopes(first: $first, after: $after) {
+    nodes {
+      id
+      scope
+      description
+      resourceName
+      permission
+      isProjectScope
+      addedAt
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

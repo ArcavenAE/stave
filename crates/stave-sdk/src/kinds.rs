@@ -36,6 +36,11 @@ pub const KIND_USER: &str = "user";
 pub const KIND_SERVICE_ACCOUNT: &str = "service_account";
 pub const KIND_AUDIT_LOG: &str = "audit_log";
 pub const KIND_CLOUD_CONFIG_RULE: &str = "cloud_config_rule";
+/// The tenant's scope vocabulary. Unlike every other kind here, this
+/// carries no tenant data: no account, resource, person or posture, only
+/// the vendor's own permission names and their descriptions. That is the
+/// point of it, and it is why `scrub.sh --catalog` is the right mode.
+pub const KIND_PERMISSION_SCOPE: &str = "permission_scope";
 
 /// All v0.1 kind names, in stable order.
 pub const ALL_KINDS: &[&str] = &[
@@ -52,6 +57,7 @@ pub const ALL_KINDS: &[&str] = &[
     KIND_SERVICE_ACCOUNT,
     KIND_AUDIT_LOG,
     KIND_CLOUD_CONFIG_RULE,
+    KIND_PERMISSION_SCOPE,
 ];
 
 /// Static metadata for one `_kind`.
@@ -207,6 +213,18 @@ const KIND_TABLE: &[KindSpec] = &[
         primary_timestamp_field: None,
         search_field: Some("name"),
     },
+    KindSpec {
+        name: KIND_PERMISSION_SCOPE,
+        list_operation: "list_permission_scopes",
+        id_field: "id",
+        severity_field: None,
+        // addedAt is when the vendor added the scope to the product, not
+        // an event in this tenant, so --since over it would read as
+        // "scopes introduced recently", which is a real question but not
+        // the one --since is for anywhere else in this table.
+        primary_timestamp_field: None,
+        search_field: Some("scope"),
+    },
 ];
 
 /// Extract the array of items from a GraphQL `data` value. With a
@@ -234,10 +252,18 @@ mod tests {
 
     use super::*;
 
+    /// The count is a tripwire so adding a kind is deliberate. The
+    /// agreement between the two lists is the real invariant: they are
+    /// written separately and a kind present in one and absent from the
+    /// other is a silent gap.
     #[test]
-    fn thirteen_kinds_in_table() {
-        assert_eq!(KIND_TABLE.len(), 13);
-        assert_eq!(ALL_KINDS.len(), 13);
+    fn the_kind_table_and_name_list_agree() {
+        assert_eq!(
+            KIND_TABLE.len(),
+            14,
+            "a kind was added or removed; update this pin and say why in the commit"
+        );
+        assert_eq!(ALL_KINDS.len(), KIND_TABLE.len());
         for (a, b) in KIND_TABLE.iter().zip(ALL_KINDS.iter()) {
             assert_eq!(&a.name, b);
         }

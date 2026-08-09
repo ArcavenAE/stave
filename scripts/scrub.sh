@@ -162,13 +162,37 @@ OWN_KINDS='["operation","operation_permissions"]'
 # author CUSTOM controls and CUSTOM frameworks named after the org, and
 # nothing in the record distinguishes the two. So names stay redacted
 # by default and --catalog is the operator saying "I looked."
-CATALOG_KINDS='["control","cloud_config_rule","security_framework","vulnerability_finding"]'
+#
+# The revealed fields are per-kind, not a fixed pair. The four original
+# kinds reveal name and description, which is what they carry. A kind
+# whose whole payload is vendor vocabulary needs its own list, or
+# --catalog reveals nothing useful and the operator reads a record of
+# redaction markers.
+#
+# permission_scope is the tenant's SCOPE VOCABULARY: vendor-defined
+# permission names, their resource, their permission class, and whether
+# they can be narrowed to a project. `addedAt` is when the vendor added
+# the scope to the product. No account, resource, person or posture
+# appears in this connection. It is still not in OWN_KINDS, because
+# OWN_KINDS means stave's own metadata, identical on every machine
+# regardless of vendor, and this comes off the wire. If Wiz ever
+# supports tenant-authored scopes, this entry must be revisited, because
+# a custom scope name could carry an org name. The text layer runs
+# either way and would still catch a GUID, email, ARN, OCID, hostname
+# or IP appearing in a description.
+CATALOG_FIELDS='{
+  "control":              ["name","description"],
+  "cloud_config_rule":    ["name","description"],
+  "security_framework":   ["name","description"],
+  "vulnerability_finding":["name","description"],
+  "permission_scope":     ["scope","description","resourceName","permission","isProjectScope","addedAt"]
+}'
 
 field_layer() {
   jq -c \
     --argjson safe "$SAFE_FIELDS" \
     --argjson own "$OWN_KINDS" \
-    --argjson catkinds "$CATALOG_KINDS" \
+    --argjson catfields "$CATALOG_FIELDS" \
     --argjson catalog "$CATALOG" '
     def scrub($safe; $extra):
       if type == "object" then
@@ -230,8 +254,7 @@ field_layer() {
         ($r._kind // "") as $kind
         | if ($own | index($kind)) then $r
           else
-            (if ($catalog == 1) and ($catkinds | index($kind))
-             then ["name","description"] else [] end) as $extra
+            (if $catalog == 1 then (($catfields[$kind]) // []) else [] end) as $extra
             | $r | scrub($safe; $extra)
           end
       end
@@ -625,6 +648,53 @@ selftest() {
     printf 'ok   %-28s\n' "positive control: v2 kept"
   else
     printf 'FAIL %-28s v2 safe fields were destroyed: %s\n' "positive control v2" "$v2kept" >&2
+    fail=1
+  fi
+
+  # permission_scope carries vendor vocabulary, so --catalog reveals its
+  # whole payload. Without --catalog it must still be redacted: the
+  # operator saying "I looked" is the entire control, and a kind that
+  # reveals itself by default has removed it.
+  local ps_rec='{"_kind":"permission_scope","scope":"read:users","description":"Read portal users","resourceName":"users","permission":"READ","isProjectScope":false,"id":"xyz"}'
+
+  local ps_default
+  ps_default="$(printf '%s\n' "$ps_rec" | run_scrub)"
+  if printf '%s' "$ps_default" | grep -q '"scope":"<redacted:scope>"'; then
+    printf 'ok   %-28s\n' "catalog: scopes hidden by default"
+  else
+    printf 'FAIL %-28s revealed without --catalog: %s\n' "catalog: default" "$ps_default" >&2
+    fail=1
+  fi
+
+  local ps_cat
+  ps_cat="$(printf '%s\n' "$ps_rec" | CATALOG=1 run_scrub)"
+  if printf '%s' "$ps_cat" | grep -q '"scope":"read:users"' \
+    && printf '%s' "$ps_cat" | grep -q '"resourceName":"users"' \
+    && printf '%s' "$ps_cat" | grep -q '"isProjectScope":false'; then
+    printf 'ok   %-28s\n' "catalog: vocabulary survives"
+  else
+    printf 'FAIL %-28s --catalog did not reveal the vocabulary: %s\n' "catalog: vocabulary" "$ps_cat" >&2
+    fail=1
+  fi
+
+  # Default-deny still applies INSIDE catalog mode. `id` is not on the
+  # per-kind list, so it stays redacted even when the operator looked.
+  if printf '%s' "$ps_cat" | grep -q '"id":"<redacted:id>"'; then
+    printf 'ok   %-28s\n' "catalog: unlisted field denied"
+  else
+    printf 'FAIL %-28s catalog mode became a blanket pass: %s\n' "catalog: unlisted" "$ps_cat" >&2
+    fail=1
+  fi
+
+  # Regression on making the allowlist per-kind: the four original kinds
+  # must still reveal exactly name and description, and nothing more.
+  local ctl_cat
+  ctl_cat="$(printf '%s\n' '{"_kind":"control","name":"CIS 1.1","description":"a vendor control","projects":["org-thing"]}' | CATALOG=1 run_scrub)"
+  if printf '%s' "$ctl_cat" | grep -q '"name":"CIS 1.1"' \
+    && printf '%s' "$ctl_cat" | grep -q '"projects":"<redacted:projects>"'; then
+    printf 'ok   %-28s\n' "catalog: per-kind list intact"
+  else
+    printf 'FAIL %-28s per-kind change altered control: %s\n' "catalog: per-kind" "$ctl_cat" >&2
     fail=1
   fi
 

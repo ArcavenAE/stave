@@ -306,6 +306,36 @@ pub const OPERATIONS: &[OperationDoc] = &[
         effects: None,
     },
     OperationDoc {
+        name: "list_permission_scopes",
+        document: include_str!("../ops/list_permission_scopes.graphql"),
+        op_type: OpType::Query,
+        root_field: "permissionScopes",
+        description: "The tenant's scope vocabulary: every permission scope with its resource, permission class, and whether it can be narrowed to a project",
+        // GUESS, and the weakest declaration in this registry. The schema
+        // carries no scope directives anywhere (zero hits for @auth,
+        // @requiresScope, @scope), so nothing derives this. The name
+        // follows the tenant's observed convention, read:<resource_plural>,
+        // as in read:service_accounts and read:cloud_accounts.
+        //
+        // It is deliberately a scope the twelve-scope measurement
+        // credential does NOT hold, which makes the first run a test:
+        // required_scopes never gates a read (it feeds ops permissions,
+        // auth can-i, and the auth plan grant union only), so if the read
+        // succeeds under that credential, this declaration is wrong or the
+        // root is ungated, and either is a result.
+        //
+        // Cost while it stands: auth plan unions this into the grant it
+        // proposes, so a mint driven by the plan would request a scope that
+        // may not exist. docs/design/measurement-account-request.md pins
+        // its twelve explicitly and is unaffected.
+        required_scopes: &["read:permission_scopes"],
+        // Vendor vocabulary, not tenant data. No account, resource, person
+        // or posture appears in this connection.
+        sensitivity: Sensitivity::Normal,
+        cost_hint: CostHint::Light,
+        effects: None,
+    },
+    OperationDoc {
         name: "list_audit_log_entries",
         document: include_str!("../ops/list_audit_log_entries.graphql"),
         op_type: OpType::Query,
@@ -343,9 +373,17 @@ pub fn find(name: &str) -> Option<&'static OperationDoc> {
 mod tests {
     use super::*;
 
+    /// A tripwire, not a fact: registering an operation should be a
+    /// deliberate act, so adding one must break a test and make someone
+    /// say so in a commit. The name no longer spells the number, because
+    /// the number changes and the intent does not.
     #[test]
-    fn thirteen_operations_registered() {
-        assert_eq!(OPERATIONS.len(), 13);
+    fn the_operation_count_is_pinned() {
+        assert_eq!(
+            OPERATIONS.len(),
+            14,
+            "an operation was added or removed; update this pin and say why in the commit"
+        );
     }
 
     #[test]
