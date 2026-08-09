@@ -11,9 +11,18 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=STAVE_BUILD_ID");
-    // Best-effort: re-stamp local builds when HEAD moves. Harmless if
-    // the path doesn't exist (cargo ignores missing rerun paths).
+    // Re-stamp local builds when HEAD moves. `.git/HEAD` alone does not
+    // do that: committing on the current branch rewrites
+    // `.git/refs/heads/<branch>` and leaves HEAD byte-identical, so the
+    // stamp went stale after every commit that did not switch branches,
+    // and a locally built binary reported a commit it did not contain.
+    // `.git/logs/HEAD` is appended by commit, checkout, reset and merge
+    // alike, so it is the one path covering all HEAD movement. Cargo
+    // ignores missing rerun paths, so a repo with the reflog disabled
+    // degrades to the old behaviour rather than failing. Working-tree
+    // edits still do not retrigger, so the `-dirty` suffix can lag.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
 
     let build_id = std::env::var("STAVE_BUILD_ID")
         .ok()
