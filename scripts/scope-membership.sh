@@ -3,6 +3,12 @@
 # declares actually present in an account's granted scope list?
 #
 #   stave --profile <p> auth scopes --from-directory | scripts/scope-membership.sh
+#   ... | scripts/scope-membership.sh read:user_accounts   # plus probe names
+#
+# Extra arguments are probe names tested alongside the declared set,
+# reported separately and never affecting the exit code. Use them to ask
+# whether a name exists at all, which the declared set cannot answer once
+# every declared name passes.
 #
 # Why this exists. `auth can-i` and `auth plan --check` run through
 # `scope_granted`, which treats `read:all` as satisfying any `read:*`
@@ -59,6 +65,20 @@ while IFS= read -r scope; do
         absent+=("$scope")
     fi
 done <<<"$declared"
+
+if (( $# > 0 )); then
+    printf '\n  probe names (not declared by the registry):\n'
+    for scope in "$@"; do
+        if grep -qxF "$scope" <<<"$granted"; then
+            printf '    PRESENT  %s\n' "$scope"
+        else
+            # Absence here is weak evidence. It shows the name is not
+            # granted to THIS account, not that the tenant lacks it. Only
+            # the permissionScopes catalogue settles existence.
+            printf '    not granted to this account  %s\n' "$scope"
+        fi
+    done
+fi
 
 if (( ${#absent[@]} > 0 )); then
     printf '\n'

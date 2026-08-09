@@ -44,12 +44,20 @@ could not have carried the conclusion, because it ran through
 `scope_granted`, which treats `read:all` as satisfying any `read:*`. The
 conclusion happens to be true, on evidence finding-007 did not have.
 
-Unresolved and deliberately out of scope here: **which** scope governs
-`list_users`. `read:users` is a real granted name, and `read:user_accounts`
-appears in the provisioner's grants, so both plausibly exist. That is a
-per-operation assignment question, which is what `SCOPE_METADATA_PROVISIONAL`
-covers, and it does not change the request below, which emits the twelve
-names the registry declares.
+Probed in the same call: **both `read:users` and `read:user_accounts` are
+real and both are granted.** Neither is a typo. So the open question is
+not spelling, it is which of two real scopes governs `list_users`, and
+the registry assigns `read:users` without evidence. That is a
+per-operation assignment question, which is what
+`SCOPE_METADATA_PROVISIONAL` covers.
+
+**Pre-registered prediction.** Variant A grants `read:users` and not
+`read:user_accounts`, deliberately. If `list_users` fails or returns
+empty under the measurement credential, the registry's assignment for
+that operation is wrong and `read:user_accounts` is the correct one.
+Recording it here so the outcome reads as a test result rather than a
+post-hoc explanation. Granting both would be the wrong fix: it would
+restore the ambiguity the least-privilege credential exists to remove.
 
 ---
 

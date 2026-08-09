@@ -44,6 +44,23 @@ content: |
      bounds the blast radius immediately, and the bound survives even
      if the mechanism is never explained.
 
+  **Instance 3, finding-008.** finding-007 claimed twelve scope names
+  are strings the server recognises, resting on `missing: 0` from
+  `plan --check`. That number runs through `scope_granted`, which
+  treats `read:all` as satisfying any `read:*`, and the credential
+  holds `read:all`, so it was equally consistent with the tenant
+  recognising none of the eleven `read:*` names. A literal
+  set-membership test, applying no implication, found all twelve
+  present. The claim was true.
+
+  Instance 3 is the one that sharpens the rule, because it has no
+  wrong answer in it. Instances 1 and 2 were findable by noticing
+  something false or overbroad. Here every answer was correct and the
+  gap was findable only by asking what the measurement ranged over. So
+  a **true** claim can sit outside a validation's scope too, and a
+  reviewer who checks conclusions rather than coverage will not catch
+  it. That is the case corollary 1 is actually for.
+
   Neither instance retracts the validation it criticises. hzg0's field
   selections are live-validated and that claim stands. What is
   retracted is the inference that a passing read means the read path is
@@ -68,4 +85,5 @@ provenance:
   evidence:
     - finding-002-paging-defects-hidden-by-single-page-validation
     - finding-006-the-server-answers-a-subset-of-what-was-asked
+    - finding-008-twelve-names-real-on-evidence-the-claim-never-had
   open_test: "a validation that states its axis and is later found to have licensed a claim outside it would falsify the corollary, not the rule"
