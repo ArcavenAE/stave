@@ -234,6 +234,76 @@ against the `excess: 67` baseline.
 
 ---
 
+## Operating modes: interactive, batch, unattended
+
+The intended use is not one operator minting one account. It is batches:
+driven by tickets, by a harness session enrolling a group of users, or by
+CI. That changes which controls still work, so it belongs in the design
+rather than in Phase 4.
+
+### Enrolment is not minting, and there are three lifetimes
+
+Enrolment is local credential management, so any binary may do it.
+Minting a token is session establishment: it presents the secret and
+leaves the process holding a usable session for that identity, so a read
+binary must not do it for a provisioning profile. That is why
+`plan_login` computes the plane check before `verify` rather than after.
+
+Three separate clocks, and only one of them is short:
+
+| Thing | Lifetime | Stored | Ended by |
+|---|---|---|---|
+| OAuth access token | server's `expires_in`, default 3600s, treated stale 300s early (`EXPIRY_MARGIN_SECS`, `token.rs:34`) | XDG state cache, mode 0600 | expiry, `auth logout`, `auth login` |
+| Client secret | none, valid until rotated | platform keyring, `client-secret:<profile>` | a human rotating it |
+| Service account | `expiresAt`, mandatory in this design | the tenant | expiry, or `deleteServiceAccount` |
+
+So yes, the minted token expires, and `auth login` clears the cache so a
+token minted from a superseded secret cannot outlive it
+(`main.rs:1099`). The row without an expiry is the middle one, and it is
+the row that grants everything. That is the argument for short
+`expiresAt` on issued accounts: it is the only clock we control.
+
+### Four controls assume a human at a terminal
+
+Each one has to be replaced, not merely waived, before a batch runs.
+
+1. **The safety coach does not exist in CI.** It is an LLM subagent
+   invoked from an interactive session. A batch harness has no such
+   reviewer, so the invariants worth checking have to be expressible as
+   code that runs in-process. The ones that cannot be expressed that way
+   are exactly the ones a human must approve in advance. This is the
+   load-bearing gap in the whole batch story and it is not yet in bd;
+   this paragraph is the layer-1 record.
+2. **Phase 1's mandatory per-call confirmation** has nobody to confirm.
+   Replace it with per-batch pre-approval: an input manifest naming every
+   account with its scopes, expiry, project narrowing and purpose,
+   reviewed once by a human, with the run refusing any account not in the
+   manifest. Confirmation moves from per-call to ahead-of-time, which is
+   also the only form that scales past a handful.
+3. **"A provision-plane profile may not come from the stored default"
+   loses its force.** A workflow file that passes `--profile provisioner`
+   on every step is a stored default with extra syntax. The refusal was
+   designed against an operator who forgot which profile was active, and
+   that failure mode does not exist unattended. The plane split still
+   holds, because it is a binary boundary rather than a habit.
+4. **The hidden secret prompt inverts.** CI needs the minter's secret in
+   the environment, which is the shape deliberately removed for humans,
+   and it is a standing high-privilege credential sitting where a lot of
+   automation can read it.
+
+Problem 4 has an answer the design already contains: give the minter
+itself a short `expiresAt` and re-mint it per campaign from the bootstrap
+account. A leaked CI secret then expires on its own, and the minting
+capability is not standing. That makes the factory recursive in a useful
+direction rather than an alarming one.
+
+Ticket-driven batches fit this well: the ticket is the manifest entry.
+It already carries the requesting human and the justification, which is
+what `description` is specified to hold, so inventory becomes traceable
+back to a request without anyone writing it down twice.
+
+---
+
 ## Open decisions
 
 **The escalation question** (`aae-orc-oqg2.2`, question 1) changes the
