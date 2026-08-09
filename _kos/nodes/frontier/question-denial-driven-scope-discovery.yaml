@@ -1,0 +1,82 @@
+id: question-denial-driven-scope-discovery
+type: question
+confidence: frontier
+title: "Does the server name required scopes in every denial, or only that one?"
+content: |
+  Opened 2026-08-08 by finding-009. One instance, and it retires an
+  expensive plan if it generalises.
+
+  `list_permission_scopes` was run under a credential that deliberately
+  lacked the scope its registry entry declared. The server refused and
+  named what it wanted:
+
+      access denied, at least one of the following is required:
+      [read:all read:permission_scopes], your permissions: [...twelve...]
+
+  So per-operation scope assignment, the open half of
+  `SCOPE_METADATA_PROVISIONAL` since scaffold, may be READABLE rather
+  than inferable:
+
+  > To learn an operation's required scopes, call it with a credential
+  > that cannot perform it, and read the refusal.
+
+  If that holds registry-wide, one deliberately under-privileged
+  credential maps all fourteen operations at one call each. finding-008
+  had named the clean discriminator as variant B applied per scope,
+  twelve accounts each holding the twelve minus one, and judged it more
+  minting than the question was worth. That route is unnecessary if this
+  generalises.
+
+  **The habit this inverts.** Every probe in this repo so far was
+  designed to make a call succeed, with denial as the failure case to be
+  avoided. Here the denial carried strictly more information than the
+  success would have: a successful read returns the catalogue and says
+  nothing about what authorised it, which is the exact gap finding-008
+  recorded for `read:users` and `list_users`. Designing a probe to
+  ELICIT a refusal is a move nothing in the process had suggested.
+
+  **The failure mode, named before the method is relied on.** An
+  operation that fails for a reason other than scope produces an error
+  that is not a scope statement. Reading it as one manufactures
+  assignments out of unrelated failures. Every denial must be checked
+  for being a scope denial before anything is concluded from it.
+
+  Sub-questions:
+
+  a. Do all fourteen operations deny this way, or is it per-resolver?
+     The eleven-kind sweep under the twelve-scope credential tests this
+     for free: every kind that fails is a sample.
+  b. Does the denial name the FULL set of acceptable scopes, or the
+     first one checked? The single instance listed two, which is
+     consistent with either.
+  c. Does `read:all` appear as an alternative in every denial? If so
+     that is general evidence for the D3 implication rule rather than
+     evidence for one operation.
+  d. Does the echoed permission list appear in every denial? It is a
+     second route to the caller's own grants, alongside the directory
+     route, and would be a cheaper one.
+  e. Is a zero-scope or single-unrelated-scope credential admissible
+     for a deliberate mapping sweep, or does an account with no useful
+     grants trip something on the tenant side?
+
+  **Why it outranks its size.** It changes the cost of the one question
+  that has been provisional since scaffold, from twelve mints to one
+  credential and fourteen calls. It also supplies the first direct
+  evidence for D3, which `scope_granted` has relied on unvalidated.
+edges:
+  - target: elem-validation-scope-matches-claim-scope
+    type: instantiates
+    note: "the finding states its axis as one operation, one credential, one denial, and refuses the general claim; corollary 1 in practice"
+  - target: elem-second-route-when-the-credential-will-not-say
+    type: supports
+    note: "sub-question d is a third route to the caller's own grants, cheaper than the directory one"
+  - target: question-partial-field-resolution
+    type: supports
+    note: "if denials name scopes, a kind returning fewer fields WITHOUT a denial is stronger evidence that stripping is silent rather than refused"
+provenance:
+  created_by: human
+  session: "2026-08-08"
+  created_at: "2026-08-08"
+  evidence:
+    - finding-009-the-server-names-the-scope-it-wanted
+  tracked_as: aae-orc-kuqt
