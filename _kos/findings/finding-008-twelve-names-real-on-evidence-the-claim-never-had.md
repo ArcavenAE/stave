@@ -88,6 +88,31 @@ empty under that credential, the registry's assignment for that operation
 is wrong and `read:user_accounts` is the correct one. Recording it now so
 the outcome is a test result rather than a post-hoc explanation.
 
+### Outcome, same day
+
+The account was minted and verified: twelve scopes, `read:all` absent,
+`read:user_accounts` absent. `stave --profile measurement list user
+--limit 2` returned populated records.
+
+So the failure condition did not occur, and the bounded result is:
+**`read:user_accounts` is not required for `list_users`.** The competing
+hypothesis is dead.
+
+What this does **not** license, and the distinction is the whole subject
+of this finding: it does not show that `read:users` is the scope that
+authorised the call. The credential holds twelve scopes and the call
+needed at least one of them. Any of the other eleven could be the actual
+authoriser, and a passing read cannot tell them apart. Applying
+corollary 1, the axis this test ranged over is *the twelve as a set*, and
+the claim it licenses is about the set, not about the member.
+
+The clean discriminator is the variant B shape applied per scope: an
+account holding the twelve minus the one under test. Twelve such accounts
+would settle every assignment, which is more minting than the question is
+currently worth, but the shape is the answer whenever a specific
+assignment starts mattering. `SCOPE_METADATA_PROVISIONAL` therefore stays
+`true` on the strength of this result rather than in spite of it.
+
 ## What changed
 
 - `SCOPE_METADATA_PROVISIONAL` stays `true`. Names validated, assignment
