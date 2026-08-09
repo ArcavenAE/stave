@@ -118,6 +118,18 @@ and `description`. Everything else is literal.
 
 ### Variant B: the `aae-orc-i8cj` discriminator
 
+> **SUPERSEDED 2026-08-09. Do not mint this.** `finding-010` measured
+> both kinds this variant was built to discriminate as complete, under
+> both credentials, so the symptom it tests for is not currently present.
+> And `finding-009` found a cheaper route to the assignment question it
+> was a proxy for: the server names required scopes in its denials, so an
+> under-privileged credential reads them off at one call each rather than
+> needing twelve accounts. The credential worth minting instead is a role
+> template from `docs/design/role-credential-templates.md`, which is both
+> a real deliverable and a scope-discovery instrument at its boundary.
+> Kept below because the reasoning is still the right shape if the
+> partial-field condition ever reproduces.
+
 The same eleven, with `read:projects` withheld. Nothing else changes.
 
 ```json
