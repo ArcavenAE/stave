@@ -311,23 +311,22 @@ pub const OPERATIONS: &[OperationDoc] = &[
         op_type: OpType::Query,
         root_field: "permissionScopes",
         description: "The tenant's scope vocabulary: every permission scope with its resource, permission class, and whether it can be narrowed to a project",
-        // GUESS, and the weakest declaration in this registry. The schema
-        // carries no scope directives anywhere (zero hits for @auth,
-        // @requiresScope, @scope), so nothing derives this. The name
-        // follows the tenant's observed convention, read:<resource_plural>,
-        // as in read:service_accounts and read:cloud_accounts.
+        // VALIDATED BY THE SERVER, 2026-08-08, and the only entry in this
+        // registry that can say so. It began as a guess from the tenant's
+        // observed convention, read:<resource_plural>. Run under the
+        // twelve-scope measurement credential, which deliberately does not
+        // hold it, the server refused and named it:
         //
-        // It is deliberately a scope the twelve-scope measurement
-        // credential does NOT hold, which makes the first run a test:
-        // required_scopes never gates a read (it feeds ops permissions,
-        // auth can-i, and the auth plan grant union only), so if the read
-        // succeeds under that credential, this declaration is wrong or the
-        // root is ungated, and either is a result.
+        //   access denied, at least one of the following is required:
+        //   [read:all read:permission_scopes]
         //
-        // Cost while it stands: auth plan unions this into the grant it
-        // proposes, so a mint driven by the plan would request a scope that
-        // may not exist. docs/design/measurement-account-request.md pins
-        // its twelve explicitly and is unaffected.
+        // Two things fall out and both are larger than this entry. The
+        // server publishes an operation's required scopes in its denial,
+        // so an under-privileged credential is a scope-discovery
+        // instrument and per-operation assignment is readable rather than
+        // inferable. And read:all appears as an alternative in the
+        // server's own list, which is the first direct evidence for the
+        // D3 implication rule, unvalidated since scaffold.
         required_scopes: &["read:permission_scopes"],
         // Vendor vocabulary, not tenant data. No account, resource, person
         // or posture appears in this connection.
