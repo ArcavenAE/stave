@@ -66,9 +66,19 @@ and only the first is usually discussed.
 
 1. **Scopes.** What kinds of thing it can read at all.
 2. **Projects** (`assignedProjectIds`). Which slice of the estate.
-   Shadows Wiz's Project Member role.
+   Shadows Wiz's Project Member role. **DEFERRED, bd `aae-orc-t5cd`.**
 3. **Expiry** (`expiresAt`). For how long. Mandatory in this design,
    never unbounded.
+
+> **Axis 2 is deferred and nothing here should rely on it.** We do not
+> yet know whether we will use project narrowing at all, how this tenant
+> uses projects, or which scopes can even be narrowed by them. The
+> "Projects:" line on each template below records what the role's shape
+> *suggests*, not a design decision, and no template should be minted
+> with `assignedProjectIds` set until `aae-orc-t5cd` is answered.
+> **Ship templates scope-narrowed and expiry-bounded only.** The scope
+> axis alone already takes the spoke-team template from 79 to 7, so
+> nothing important waits on this.
 
 Two roles with identical scope sets can be different credentials. An
 incident responder and a standing vulnerability analyst need the same
@@ -244,12 +254,14 @@ reaches it.
 
 ## What is not yet settled
 
-**Project narrowing is designed blind.** `PermissionScope.isProjectScope`
-states per scope whether it can be narrowed by `assignedProjectIds` at
-all. Until the scope catalogue is read, every "Projects: yes" above is an
-assumption. Reading it needs `read:all` or `read:permission_scopes`;
-`reader` holds the former, so this costs one read and no mint. It should
-happen before any template with project narrowing is minted.
+**Project narrowing is deferred, not merely unknown.** Tracked as bd
+`aae-orc-t5cd`, which carries five separate unknowns: which scopes are
+project-narrowable (`PermissionScope.isProjectScope`, one read away),
+whether this tenant's projects correspond to anything a role boundary
+should follow, whether `assignedProjectIds` on a service account behaves
+like Project Member does on a user, what happens to a pinned credential
+when projects are reorganised, and whether the axis is worth its
+operational cost at all. That last one has a legitimate answer of "no".
 
 **The scope assignments are provisional.** `SCOPE_METADATA_PROVISIONAL`
 is `true`. Twelve names are validated (finding-008) and one assignment is
@@ -270,10 +282,14 @@ Mechanics are in `docs/design/measurement-account-request.md`: the
 enrolled with `stave profile add` plus `stave auth login`, then verified
 with `scripts/scope-membership.sh`.
 
-Two changes for a role template. Substitute the role's grant list for the
-twelve. And set `assignedProjectIds`, which the measurement account
-deliberately omitted to avoid confounding a scope measurement with a
-project one, but which a real role wants.
+One change for a role template: substitute the role's grant list for the
+twelve. Leave `assignedProjectIds` omitted, as the measurement account
+did, until `aae-orc-t5cd` is answered.
+
+Whether this set should become a first-class artifact rather than a
+document, definable and tunable and used by a provisioning process, is
+captured as an idea rather than a plan:
+`_kos/ideas/role-template-catalogues-for-provisioning.md`.
 
 Naming follows `credential-plane.md`: `stave-<role>-<owner>-<yyyymm>`,
 with `description` carrying the requesting human and the justifying
