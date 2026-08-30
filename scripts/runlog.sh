@@ -120,6 +120,7 @@ RUN_ID=""
 SESSION_ID=""
 RUNBOOK=""
 AUDIT_DIR=""
+BINARY_PATH=""
 
 resolve_run_dir() {
   local d="${1:-}"
@@ -137,6 +138,9 @@ load_run() {
   SESSION_ID="$RUNLOG_SESSION_ID"
   RUNBOOK="$RUNLOG_RUNBOOK"
   AUDIT_DIR="$RUNLOG_AUDIT_DIR"
+  # The binary init resolved and skew-checked. Absent from runs whose init
+  # predates this field; exec falls back to resolving STAVE_BIN_NAME then.
+  BINARY_PATH="${RUNLOG_BINARY_PATH:-}"
 }
 
 require_not_halted() {
@@ -244,6 +248,10 @@ EOF
   local bin_path bin_ver bin_sha tree_sha bin_dirty=0 skew_reason="" skew_basis=""
   bin_path="$(command -v "$STAVE_BIN_NAME" 2>/dev/null || true)"
   [[ -n "$bin_path" ]] || die "init: no '$STAVE_BIN_NAME' on PATH" "$EX_STATE"
+  # Absolutize. `command -v` returns a relative STAVE_BIN (./target/debug/
+  # stave) verbatim; pinning that would re-resolve against exec's working
+  # directory, which need not equal init's. An absolute path does not.
+  bin_path="$(realpath_of "$bin_path" || printf '%s' "$bin_path")"
   bin_ver="$("$bin_path" --version 2>/dev/null | head -1 || true)"
   [[ -n "$bin_ver" ]] || bin_ver="unknown"
   tree_sha="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -303,6 +311,15 @@ run_start; it does not hide it.
 EOF
     exit "$EX_STATE"
   fi
+
+  # Pin the binary this run executes to the one just resolved and
+  # skew-checked. `exec` reads this rather than re-resolving on PATH,
+  # which may have changed, or may no longer carry STAVE_BIN, mid-run.
+  # The canonical command the coach reviews stays the basename (normally
+  # `stave`); only which binary runs is recorded here. Single quotes in
+  # the path are escaped so `load_run`'s `. run.env` cannot be broken by
+  # a path like /opt/bob's-build/stave.
+  printf "RUNLOG_BINARY_PATH='%s'\n" "${bin_path//\'/\'\\\'\'}" >> "$RUN_DIR/run.env"
 
   jq -n --arg sv "$tree_sha" --arg bp "$bin_path" --arg bv "$bin_ver" \
         --argjson skew "$([[ "$skew_ok" -eq 1 ]] && echo true || echo false)" \
@@ -716,8 +733,31 @@ cmd_exec() {
   load_run
   require_not_halted
 
-  [[ "$(basename "${argv[0]}")" == "$STAVE_BIN_NAME" ]] \
-    || die "exec: this harness runs '$STAVE_BIN_NAME' and nothing else; got '${argv[0]}'"
+  # The binary this run executes is the one init resolved and recorded.
+  # Fall back to resolving STAVE_BIN_NAME for runs whose init predates the
+  # recorded field. Either way the CANONICAL command and the coach's
+  # verdict use the binary's basename (normally `stave`); STAVE_BIN's
+  # directory only decides which binary that basename is, so a path-valued
+  # STAVE_BIN never reaches the canon or the gate below.
+  local exec_bin="$BINARY_PATH"
+  if [[ -z "$exec_bin" ]]; then
+    exec_bin="$(command -v "$STAVE_BIN_NAME" 2>/dev/null || true)"
+    [[ -n "$exec_bin" ]] || die "exec: no '$STAVE_BIN_NAME' found to run" "$EX_STATE"
+  fi
+  # A run pins its binary at init; if it was moved, deleted, or rebuilt
+  # away since, fail as a state error naming the binary rather than
+  # letting the launch fail opaquely and be recorded as a command failure.
+  [[ -x "$exec_bin" ]] || die "exec: run binary is not an executable file: $exec_bin" "$EX_STATE"
+
+  # The gate is on the binary's basename. argv[0] the coach reviewed must
+  # name the stave binary and nothing else — but compared by basename, so
+  # a path-valued STAVE_BIN (or a path written into argv[0]) does not make
+  # this gate unpassable. Before this fix a path-valued STAVE_BIN was
+  # compared against a bare basename and could never match: bd aae-orc-98g6.
+  local want_name
+  want_name="$(basename "$exec_bin")"
+  [[ "$(basename "${argv[0]}")" == "$want_name" ]] \
+    || die "exec: this harness runs '$want_name' and nothing else; got '${argv[0]}'"
 
   local canon sha
   canon="$(canon_argv "${argv[@]}")"
@@ -822,6 +862,13 @@ EOF
   local stdin_from="/dev/null"
   [[ -n "$in_path" ]] && stdin_from="$in_path"
 
+  # Launch the configured binary, carrying the reviewed argv[1:] through
+  # unchanged. argv[0] was only ever the logical name for the coach and
+  # the record; the process itself is exec_bin, so the run executes the
+  # binary init pinned rather than whatever PATH resolves argv[0] to.
+  local -a run_argv=("$exec_bin")
+  [[ "${#argv[@]}" -gt 1 ]] && run_argv+=("${argv[@]:1}")
+
   # `render` is the ONLY unscrubbed path, and it cannot reach the tenant.
   if [[ "$mode" != "render" ]]; then
     # Tenant output never touches a durable path unscrubbed: the raw
@@ -829,13 +876,13 @@ EOF
     local -a scrub_args=()
     [[ "$catalog" -eq 1 ]] && scrub_args+=(--catalog)
     set +e
-    "${argv[@]}" < "$stdin_from" 2> "$errfile" | "$SCRUB" ${scrub_args[@]+"${scrub_args[@]}"} > "$outfile"
+    "${run_argv[@]}" < "$stdin_from" 2> "$errfile" | "$SCRUB" ${scrub_args[@]+"${scrub_args[@]}"} > "$outfile"
     local -a st=("${PIPESTATUS[@]}")
     set -e
     rc_cmd="${st[0]}"; rc_scrub="${st[1]}"
   else
     set +e
-    "${argv[@]}" < "$stdin_from" 2> "$errfile" > "$outfile"
+    "${run_argv[@]}" < "$stdin_from" 2> "$errfile" > "$outfile"
     rc_cmd=$?
     set -e
     rc_scrub=0
@@ -1229,6 +1276,65 @@ STUB
   rc=0; "$0" reconcile >/dev/null 2>&1 || rc=$?
   [[ "$rc" -ne 0 ]] && ok_ "reconcile: bypass detected" \
     || bad_ "reconcile: bypass detected" "rc=$rc"
+
+  # 11. STAVE_BIN as a PATH. bd aae-orc-98g6: the exec gate compared a
+  #     bare basename against the whole path and could never match, so a
+  #     path-valued STAVE_BIN made exec unpassable; and had it passed,
+  #     exec ran whatever `stave` resolved to on PATH while init recorded
+  #     the configured binary, so the record disagreed with what ran.
+  #     The binary lives OUTSIDE PATH, and a DIFFERENT `stave` sits first
+  #     on PATH, so "runs the configured one" and "runs PATH's" are
+  #     distinguishable by which marker file gets touched.
+  mkdir -p "$root/altbin"
+  cat > "$root/altbin/stave" <<'ALT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'stave 0.0.1 (alpha-altbin-%s)\n' "${STUB_VERSION_SHA:-0000000}"; exit 0
+fi
+printf 'ran\n' >> "${ALT_RAN_MARKER:?}"
+mkdir -p "${STAVE_AUDIT_DIR:?}"
+trace="0198a2c1-7f3e-7c21-9b04-$(printf '%012d' "$(( RANDOM * RANDOM % 999999999 ))")"
+case "${1:-}${2:+ $2}" in
+  "list issue")
+    jq -nc --arg t "$trace" --arg s "${STAVE_SESSION_ID:-}" \
+      '{schema_version:3, trace_id:$t, invocation:{session_id:$s},
+        operation:{id:"list_issues"}, result:"ok"}' >> "$STAVE_AUDIT_DIR/day.jsonl"
+    printf '{"_kind":"issue","id":"iss-alt","severity":"CRITICAL","status":"OPEN"}\n' ;;
+  *) printf 'altbin: unsupported: %s\n' "$*" >&2; exit 9 ;;
+esac
+ALT
+  chmod +x "$root/altbin/stave"
+  local altrd="$root/run-altbin"
+  export ALT_RAN_MARKER="$root/alt-ran"; : > "$ALT_RAN_MARKER"
+  : > "$STUB_RAN_MARKER"
+
+  # init pins the run to the path-valued binary. It records the absolute,
+  # symlink-resolved path (mktemp lives under a /var -> /private/var
+  # symlink on macOS), so the expectation is canonicalized the same way.
+  local altbin_canon
+  altbin_canon="$(cd "$root/altbin" && pwd -P)/stave"
+  STAVE_BIN="$root/altbin/stave" "$0" init --runbook A1 --run-dir "$altrd" --allow-skew >/dev/null
+  jq -e --arg bp "$altbin_canon" 'select(.type=="run_start") | .binary_path == $bp' \
+    < "$altrd/runlog.jsonl" >/dev/null \
+    && ok_ "stave-bin: a path-valued STAVE_BIN is recorded as the run binary" \
+    || bad_ "stave-bin: a path-valued STAVE_BIN is recorded as the run binary"
+
+  # The canonical command stays the logical name, and STAVE_BIN need not
+  # even be re-exported: exec runs the binary init pinned in run.env.
+  rc=0
+  (
+    export STAVE_RUNLOG_DIR="$altrd"
+    c="$("$0" canon -- stave list issue --limit 2)"
+    coach CLEAR "$c" | "$0" verdict --coach-file - -- stave list issue --limit 2 >/dev/null
+    "$0" exec --out alt.jsonl -- stave list issue --limit 2 >/dev/null 2>&1
+  ) || rc=$?
+  if [[ "$rc" -eq 0 && -s "$ALT_RAN_MARKER" && ! -s "$STUB_RAN_MARKER" && -s "$altrd/data/alt.jsonl" ]]; then
+    ok_ "stave-bin: path-valued STAVE_BIN execs, and runs that binary not PATH's"
+  else
+    bad_ "stave-bin: path-valued STAVE_BIN execs, and runs that binary not PATH's" \
+      "rc=$rc alt=$(wc -c <"$ALT_RAN_MARKER" 2>/dev/null || echo 0) stub=$(wc -c <"$STUB_RAN_MARKER" 2>/dev/null || echo 0)"
+  fi
 
   if [[ "$fail" -ne 0 ]]; then
     printf '\nrunlog.sh selftest FAILED\n' >&2

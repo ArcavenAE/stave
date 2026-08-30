@@ -99,6 +99,23 @@ the correct thing to do, and it is exactly the case a sha comparison
 cannot police. The mtime check does not depend on the binary's
 self-report at all, which is the property worth having.
 
+`STAVE_BIN` selects which binary is under test. It may be a bare name
+resolved on `PATH` (the default, `stave`) or an absolute path to a
+specific build. `init` resolves it once, skew-checks it, and pins the
+resolved path in `run.env` as `RUNLOG_BINARY_PATH`; every later `exec`
+runs that exact binary rather than re-resolving `PATH`, which may have
+changed, or may no longer carry `STAVE_BIN`, by the time a step runs.
+The canonical command the coach reviews and the runlog records uses the
+binary's *basename* (`stave`, unless `STAVE_BIN` names a differently
+named build), never its directory, so a path-valued `STAVE_BIN` does not
+leak its path into the record and does not reach the gate — the gate
+matches argv[0] against the binary by basename too. Before bd
+`aae-orc-98g6` a path-valued `STAVE_BIN` was compared against a bare
+basename, which could never match, so `exec` was unpassable; and had it
+passed, `exec` ran whatever `stave` resolved to on `PATH` while `init`
+had recorded the configured binary, so the record disagreed with what
+ran.
+
 `--allow-skew` exists and records `skew_allowed: true` plus the reason in
 `run_start`. It does not hide the mismatch.
 
@@ -515,7 +532,7 @@ beside `scrub.sh --selftest`. Synthetic values only, no tenant, no
 credentials, no network. The real binary is never invoked: `argv[0]`
 resolves to a stub on `PATH`.
 
-Nineteen checks, in four groups.
+Twenty-eight checks, in six groups.
 
 **The gate.** No verdict on file refuses and the stub is never run
 (asserted by a marker file the stub touches on every invocation). A
@@ -540,6 +557,13 @@ well-formed entry records both fields.
 **Reconcile.** A clean run reconciles. Running the stub directly, with
 the run's session id in the environment and outside the harness, is
 detected as a bypass.
+
+**The binary selection.** A path-valued `STAVE_BIN` is recorded as the
+run binary, `exec` accepts the logical `stave` command against it rather
+than refusing, and the binary that actually runs is the configured one
+and not a same-named binary sitting first on `PATH` (asserted by which
+of two marker files is touched). The regression this guards is bd
+`aae-orc-98g6`.
 
 What the tests prove is narrower than what the harness claims, in one
 place: they prove no CLEAR-less invocation executes, not that a coach
