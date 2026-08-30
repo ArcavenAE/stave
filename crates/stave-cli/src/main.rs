@@ -2435,7 +2435,10 @@ fn predicate_ast_shape(program: &cel_interpreter::Program) -> String {
     // `{:x}` on the digest stopped compiling when sha2 0.11 dropped the
     // LowerHex impl on finalize()'s output; the SDK helper renders the
     // same lowercase, separator-free hex, so recorded hashes are stable.
-    format!("sha256:{}", stave_sdk::audit::hex_encode(&hasher.finalize()))
+    format!(
+        "sha256:{}",
+        stave_sdk::audit::hex_encode(&hasher.finalize())
+    )
 }
 
 /// Fold a CEL program's Debug representation into a shape: literal
