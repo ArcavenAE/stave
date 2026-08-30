@@ -411,7 +411,11 @@ fn shape_string(v: &Value) -> String {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+/// Lowercase hex encoding with no separators — the byte-for-byte
+/// equivalent of `{:x}` on a digest. Public so every consumer renders a
+/// digest identically, including callers that can no longer use `{:x}`
+/// after `sha2` 0.11 removed the `LowerHex` impl on `finalize()`'s output.
+pub fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -443,6 +447,21 @@ mod tests {
         let a = json!({"id": "1"});
         let b = json!({"id": 1});
         assert_ne!(shape_hash(&a), shape_hash(&b));
+    }
+
+    #[test]
+    fn hex_encode_is_lowercase_zero_padded_no_separators() {
+        // The exact contract every digest-rendering caller depends on,
+        // pinned on a fixed input so it is independent of any hash: bytes
+        // render low-to-high, each as two lowercase hex digits with no
+        // separators. This is what `{:x}` on a digest produced before
+        // sha2 0.11 dropped the impl (ArcavenAE/stave#18); keeping it
+        // byte-identical is what keeps recorded hashes stable.
+        assert_eq!(
+            hex_encode(&[0x00, 0x0f, 0xa0, 0xff, 0xde, 0xad, 0xbe, 0xef]),
+            "000fa0ffdeadbeef"
+        );
+        assert_eq!(hex_encode(&[]), "");
     }
 
     #[test]

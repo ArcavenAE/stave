@@ -2432,7 +2432,13 @@ fn predicate_ast_shape(program: &cel_interpreter::Program) -> String {
     let stripped = strip_literals(&debug);
     let mut hasher = Sha256::new();
     hasher.update(stripped.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    // `{:x}` on the digest stopped compiling when sha2 0.11 dropped the
+    // LowerHex impl on finalize()'s output; the SDK helper renders the
+    // same lowercase, separator-free hex, so recorded hashes are stable.
+    format!(
+        "sha256:{}",
+        stave_sdk::audit::hex_encode(&hasher.finalize())
+    )
 }
 
 /// Fold a CEL program's Debug representation into a shape: literal
@@ -3239,6 +3245,23 @@ mod tests {
             shape_of(r#"severity == "HIGH""#)
         );
         assert_eq!(shape_of("first == 5"), shape_of("first == 4096"));
+    }
+
+    #[test]
+    fn ast_shape_is_well_formed_sha256() {
+        // The CLI call site is wired to the digest helper and emits a
+        // well-formed `sha256:` + 64 hex-digit string (ArcavenAE/stave#18,
+        // where `{:x}` on the digest stopped compiling). The exact
+        // lowercase, zero-padded, separator-free encoding is pinned
+        // independently, on a fixed input, by
+        // stave_sdk::audit::tests::hex_encode_is_lowercase_zero_padded_no_separators.
+        let s = shape_of(r#"severity == "CRITICAL""#);
+        let hex = s.strip_prefix("sha256:").expect("sha256: prefix");
+        assert_eq!(hex.len(), 64, "sha256 hex is 64 chars: {s}");
+        assert!(
+            hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "sha256 body is hex: {s}"
+        );
     }
 
     #[test]
