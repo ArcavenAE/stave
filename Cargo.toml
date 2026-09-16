@@ -46,7 +46,7 @@ clap_complete = "4"
 figment = { version = "0.10", features = ["toml", "env"] }
 toml = "1"
 dirs = "6"
-keyring = { version = "3", features = ["apple-native", "linux-native"] }
+keyring = { version = "4", features = ["apple-native", "linux-native"] }
 
 bytes = "1"
 
