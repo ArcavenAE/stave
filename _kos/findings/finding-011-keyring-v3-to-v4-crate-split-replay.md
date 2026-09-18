@@ -61,8 +61,13 @@ vendor credential than its siblings, so it is measured on its own. The agent doe
 not touch the live tenant, and the stave binary invocation for the read-back runs
 through stave's safety-coach gate.
 
-RESULT: pending the director's read-only read-back on the built v4 stave binary.
-Update this line once measured.
+RESULT: transparent upgrade (measured 2026-09-18). The director ran a read-only
+`auth status` on the built v4 binary. It reported the client secret present with
+`source: keyring` (secret length 64 bytes; value never surfaced), exit 0, and the
+read-only posture and write-refused guard intact. The v3-written client secret
+reads back under v4 with no re-authentication and no macOS Keychain prompt. No
+upgrade note is needed. That closes the three-CLI chain: all of sidestep,
+bloomctl, and stave measured transparent.
 
 ## Linux caveat (recorded, not chased)
 
