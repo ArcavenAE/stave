@@ -1,5 +1,7 @@
 # Implementation Plan: Read-Only Posture and the Permissions Report
 
+Closed 2026-10-25: shipped, the read-only posture and permissions report (4402da0)
+
 Implements the decisions in
 `docs/design/read-only-posture-and-permissions-report.md` (D1 through D11).
 Drafted 2026-08-05. This plan and every test description in it are governed by

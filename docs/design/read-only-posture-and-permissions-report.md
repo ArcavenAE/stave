@@ -1,5 +1,7 @@
 # Read-Only Posture and the Permissions Report
 
+Closed 2026-10-25: shipped, the read-only posture and permissions report (4402da0)
+
 Design brief. Drafted 2026-08-05 from a party-mode design review (architect,
 test architect, platform engineer, systems/safety reviewers, two LLM-behavior
 reviewers), revised the same day after an operator review that verified the
