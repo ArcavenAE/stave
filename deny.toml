@@ -45,6 +45,12 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained, no patched version; via zbus 5 from keyring; zbus 6 is the migration; re-check 2026-11-06" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained, no patched version; via zbus 5 from keyring; zbus 6 is the migration; re-check 2026-11-06" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, no patched version; via zbus 5 from keyring; zbus 6 is the migration; re-check 2026-11-06" },
+    # chrono 0.4.x is unmaintained per RUSTSEC-2026-0543, with no patched
+    # version. stave-sdk and stave-cli use it directly, and cel-interpreter
+    # pulls it too through its "chrono" feature (workspace Cargo.toml), so
+    # migrating stave's own code alone does not clear the advisory.
+    # Re-check 2026-12-18.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no patched version; also via cel-interpreter chrono feature, so a stave-only migration does not clear it; re-check 2026-12-18" },
 ]
 
 [sources]
